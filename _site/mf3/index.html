@@ -424,14 +424,17 @@ function renderStaticMap(c){
       const dc= DISTRICTS[d].color;
 
       if(t===T_ROAD_H||t===T_ROAD_V||t===T_ROAD_INT){
-        // Asphalt — slightly varied tone
-        const tone = 18 + ((col*3+r*7)%5);
-        c.fillStyle=`rgb(${tone},${tone+3},${tone+8})`;
+        const tone = 20 + ((col*3+r*7)%6);
+        const g = c.createLinearGradient(x,y,x+TILE,y+TILE);
+        g.addColorStop(0, `rgb(${tone+6},${tone+8},${tone+14})`);
+        g.addColorStop(1, `rgb(${tone-4},${tone-2},${tone+2})`);
+        c.fillStyle = g;
         c.fillRect(x,y,TILE,TILE);
-        // Subtle asphalt grain
-        c.fillStyle='rgba(0,0,0,0.08)';
+        c.fillStyle='rgba(0,0,0,0.06)';
         c.fillRect(x,y,TILE/2,TILE/2);
         c.fillRect(x+TILE/2,y+TILE/2,TILE/2,TILE/2);
+        c.strokeStyle='rgba(255,255,255,0.03)'; c.lineWidth=0.5;
+        c.beginPath(); c.moveTo(x,y+TILE); c.lineTo(x+TILE,y); c.stroke();
       } else if(t===T_PAVEMENT){
         // Paving slab — district-tinted
         const br = 22+dc[0]*0.06|0, bg = 26+dc[1]*0.06|0, bb = 34+dc[2]*0.07|0;
@@ -522,30 +525,43 @@ function renderStaticMap(c){
       const x = col*TILE, y = r*TILE;
       const bw = w*TILE, bHH = bh2*TILE;
       const dc = DISTRICTS[d].color;
-      const depth = Math.min(8, bh*2.5); // shadow depth based on height
+      const depth = Math.min(10, 4 + bh * 2.2);
 
-      // Drop shadow (south-east offset)
-      c.fillStyle='rgba(0,0,0,0.45)';
+      c.fillStyle='rgba(0,0,0,0.38)';
       c.fillRect(x+depth, y+depth, bw, bHH);
+      c.fillStyle='rgba(0,0,0,0.12)';
+      c.fillRect(x+depth*0.45, y+depth*0.45, bw, bHH);
 
-      // Wall base — district-tinted dark
-      const wallR = 10+dc[0]*0.06|0, wallG = 14+dc[1]*0.06|0, wallB = 20+dc[2]*0.08|0;
-      c.fillStyle=`rgb(${wallR},${wallG},${wallB})`;
+      const wallR = 12+dc[0]*0.07|0, wallG = 16+dc[1]*0.07|0, wallB = 22+dc[2]*0.09|0;
+      const face = c.createLinearGradient(x+bw, y, x, y+bHH);
+      face.addColorStop(0, `rgb(${wallR+28},${wallG+22},${wallB+18})`);
+      face.addColorStop(0.55, `rgb(${wallR},${wallG},${wallB})`);
+      face.addColorStop(1, `rgb(${wallR-8|0},${wallG-8|0},${wallB-6|0})`);
+      c.fillStyle = face;
       c.fillRect(x,y,bw,bHH);
 
-      // Isometric top face (lighter)
-      const topR = wallR+8, topG = wallG+8, topB = wallB+12;
+      const southShade = c.createLinearGradient(x, y+bHH-2, x, y+bHH);
+      southShade.addColorStop(0, 'rgba(0,0,0,0)');
+      southShade.addColorStop(1, 'rgba(0,0,0,0.35)');
+      c.fillStyle = southShade;
+      c.fillRect(x,y,bw,bHH);
+
+      const eastShade = c.createLinearGradient(x+bw-3, y, x+bw, y);
+      eastShade.addColorStop(0, 'rgba(0,0,0,0)');
+      eastShade.addColorStop(1, 'rgba(0,0,0,0.28)');
+      c.fillStyle = eastShade;
+      c.fillRect(x,y,bw,bHH);
+
+      const topR = wallR+14, topG = wallG+12, topB = wallB+20;
       c.fillStyle=`rgb(${topR},${topG},${topB})`;
-      c.fillRect(x,y,bw,4);   // top edge
-      c.fillRect(x,y,3,bHH);  // left edge
+      c.fillRect(x,y,bw,5);
+      c.fillRect(x,y,4,bHH);
 
-      // Roof — slightly different shade
-      c.fillStyle=`rgb(${wallR+4},${wallG+6},${wallB+14})`;
-      c.fillRect(x+3,y+3,bw-6,4);
+      c.fillStyle=`rgb(${wallR+8},${wallG+10},${wallB+22})`;
+      c.fillRect(x+4,y+4,bw-8,5);
 
-      // Outer border
-      c.strokeStyle=`rgba(${dc[0]/2|0},${80+dc[1]/3|0},${100+dc[2]/3|0},0.12)`;
-      c.lineWidth=0.5; c.strokeRect(x+0.5,y+0.5,bw-1,bHH-1);
+      c.strokeStyle=`rgba(${dc[0]/2|0},${75+dc[1]/3|0},${105+dc[2]/3|0},0.18)`;
+      c.lineWidth=1; c.strokeRect(x+0.5,y+0.5,bw-1,bHH-1);
 
       // Antenna on tall buildings
       if(bh>2.5){
@@ -790,14 +806,13 @@ function buildFogMask(){
   fc.fillStyle = 'rgba(255,255,255,1)';
   fc.fill();
 
-  const featherOut = FOV_RANGE * 0.88;
-  const grad = fc.createRadialGradient(cx, cy, FOV_RANGE * 0.35, cx, cy, featherOut);
-  grad.addColorStop(0, 'rgba(0,0,0,0)');
-  grad.addColorStop(0.72, 'rgba(0,0,0,0.35)');
-  grad.addColorStop(1, 'rgba(0,0,0,0.95)');
-  fc.globalCompositeOperation = 'destination-in';
-  fc.fillStyle = grad;
-  fc.fillRect(0, 0, fw, fh);
+  fc.globalCompositeOperation = 'destination-out';
+  fc.strokeStyle = 'rgba(255,255,255,0.35)';
+  fc.lineWidth = 22;
+  fc.lineJoin = 'round';
+  fc.lineCap = 'round';
+  fc.stroke();
+
   fc.restore();
 }
 
@@ -829,7 +844,13 @@ function drawWorld(t){
 
   const na = clock.nightAlpha;
   if(na > 0){
-    ctx.fillStyle = `rgba(0,5,20,${na})`;
+    const ng = ctx.createLinearGradient(0, 0, 0, H);
+    ng.addColorStop(0, `rgba(22,36,72,${na * 0.85})`);
+    ng.addColorStop(0.5, `rgba(4,8,28,${na})`);
+    ng.addColorStop(1, `rgba(8,4,18,${na * 0.95})`);
+    ctx.fillStyle = ng;
+    ctx.fillRect(0,0,W,H);
+    ctx.fillStyle = `rgba(255,152,72,${na * 0.04})`;
     ctx.fillRect(0,0,W,H);
     drawStreetLamps(na, t);
   }
@@ -965,17 +986,20 @@ function drawPlayer(t){
 
 // ─── VIGNETTE ────────────────────────────────────────────────────────
 function drawVignette(){
-  const grad = ctx.createRadialGradient(W/2,H/2,H*0.28,W/2,H/2,H*0.8);
+  const na = clock.nightAlpha;
+  const edge = 0.38 + na * 0.14;
+  const grad = ctx.createRadialGradient(W/2,H/2,H*0.32,W/2,H/2,H*0.82);
   grad.addColorStop(0,'rgba(0,0,0,0)');
-  grad.addColorStop(1,'rgba(0,0,0,0.5)');
+  grad.addColorStop(1,`rgba(0,0,0,${edge})`);
   ctx.fillStyle = grad;
   ctx.fillRect(0,0,W,H);
 }
 
 // Scanlines
 function drawScanlines(){
+  const a = clock.nightAlpha > 0.2 ? 0.055 : 0.028;
   for(let sy=0;sy<H;sy+=3){
-    ctx.fillStyle='rgba(0,0,0,0.04)';
+    ctx.fillStyle=`rgba(0,0,0,${a})`;
     ctx.fillRect(0,sy,W,1);
   }
 }
