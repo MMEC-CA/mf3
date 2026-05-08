@@ -1,11 +1,1049 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>mf3</title>
-  </head>
-  <body>
-    <p>mf3</p>
-  </body>
+<head>
+<meta charset="UTF-8">
+<title>Beat Cop</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow+Condensed:wght@400;600;700&display=swap');
+*{margin:0;padding:0;box-sizing:border-box;}
+body{background:#0a0c0f;overflow:hidden;width:100vw;height:100vh;font-family:'Barlow Condensed',sans-serif;}
+#ui-root{position:fixed;inset:0;pointer-events:none;z-index:10;}
+canvas{display:block;}
+
+/* HUD */
+#hud-top{
+  position:absolute;top:12px;left:12px;right:12px;
+  display:flex;justify-content:space-between;align-items:flex-start;
+  pointer-events:none;
+}
+.hud-badge{
+  background:rgba(8,12,18,0.85);
+  border:1px solid rgba(255,255,255,0.08);
+  border-radius:4px;
+  padding:8px 14px;
+  font-family:'Share Tech Mono',monospace;
+  font-size:11px;
+  color:rgba(255,255,255,0.5);
+  letter-spacing:2px;
+  text-transform:uppercase;
+  backdrop-filter:blur(6px);
+}
+.hud-badge strong{
+  display:block;
+  font-size:18px;
+  color:#e8d5a0;
+  letter-spacing:3px;
+  line-height:1;
+  margin-bottom:2px;
+}
+
+#hud-time{
+  font-family:'Share Tech Mono',monospace;
+  font-size:28px;
+  color:#e8d5a0;
+  letter-spacing:4px;
+  background:rgba(8,12,18,0.85);
+  border:1px solid rgba(255,255,255,0.08);
+  border-radius:4px;
+  padding:6px 14px;
+  text-align:center;
+}
+#hud-time small{
+  display:block;
+  font-size:9px;
+  color:rgba(255,255,255,0.3);
+  letter-spacing:3px;
+}
+
+#hud-zone{
+  text-align:right;
+}
+
+/* Controls hint */
+#controls{
+  position:absolute;bottom:12px;left:50%;transform:translateX(-50%);
+  background:rgba(8,12,18,0.75);
+  border:1px solid rgba(255,255,255,0.07);
+  border-radius:4px;
+  padding:6px 14px;
+  font-family:'Share Tech Mono',monospace;
+  font-size:10px;
+  color:rgba(255,255,255,0.3);
+  letter-spacing:2px;
+  backdrop-filter:blur(4px);
+}
+#controls span{color:rgba(232,213,160,0.6);}
+
+/* Notify toast */
+#notify{
+  position:absolute;bottom:50px;left:50%;transform:translateX(-50%);
+  background:rgba(8,12,18,0.9);
+  border-left:3px solid #e8d5a0;
+  border-radius:3px;
+  padding:8px 18px;
+  font-size:14px;
+  color:rgba(255,255,255,0.8);
+  letter-spacing:1px;
+  opacity:0;
+  transition:opacity 0.3s;
+  white-space:nowrap;
+  pointer-events:none;
+}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="ui-root">
+  <div id="hud-top">
+    <div class="hud-badge">
+      <strong>OFFICER</strong>
+      Rook · Badge #4471
+    </div>
+    <div id="hud-time">
+      <div id="clock">08:00</div>
+      <small>SHIFT · DAY 1</small>
+    </div>
+    <div class="hud-badge hud-zone" id="zone-badge">
+      <strong id="zone-name">PRECINCT 9</strong>
+      <span id="zone-trust">Trust: —</span>
+    </div>
+  </div>
+  <div id="controls">
+    <span>WASD / ARROWS</span> move &nbsp;·&nbsp; more controls coming next chunk
+  </div>
+  <div id="notify"></div>
+</div>
+
+<script>
+'use strict';
+// ─── CANVAS SETUP ───────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+let W, H;
+let mapCanvas, mapCtx, mapDirty = true;
+function resize(){
+  W = canvas.width  = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  mapDirty = true;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ─── CONSTANTS ──────────────────────────────────────────────────────
+const TILE   = 40;          // pixels per tile — zoomed in
+const COLS   = 80;          // map width in tiles
+const ROWS   = 80;          // map height in tiles
+const MW     = COLS * TILE; // map pixel width
+const MH     = ROWS * TILE; // map pixel height
+
+// Shift: 10 real-seconds = 1 in-game hour; 08:00 → 20:00 then loops back to 08:00
+const REAL_PER_GAME_HOUR = 10; // seconds
+const SHIFT_START_HOUR = 8;  // 08:00
+const SHIFT_END_HOUR   = 20; // 20:00
+const SHIFT_HOURS = SHIFT_END_HOUR - SHIFT_START_HOUR; // 12 hours per cycle
+
+// ─── MAP GENERATION ─────────────────────────────────────────────────
+// Tile types
+const T_BUILDING = 0;
+const T_ROAD_H   = 1;
+const T_ROAD_V   = 2;
+const T_ROAD_INT = 3;
+const T_PARK     = 4;
+const T_PAVEMENT = 5;
+
+// District definitions (bounding tile rect + name + color tint)
+const DISTRICTS = [
+  { name:'Millbank Row',  r:0,  c:0,  rr:39, cc:39, color:[40,80,160],  trust:65 },
+  { name:'The Docks',     r:0,  c:40, rr:39, cc:79, color:[160,80,20],   trust:40 },
+  { name:'Greenvale',     r:40, c:0,  rr:79, cc:39, color:[20,120,60],   trust:80 },
+  { name:'Irongate',      r:40, c:40, rr:79, cc:79, color:[120,30,140],  trust:55 },
+];
+
+let map   = new Uint8Array(COLS * ROWS);
+let dmap  = new Uint8Array(COLS * ROWS); // district index per tile
+let bdata = []; // building metadata array
+
+function ti(c, r){ return r * COLS + c; }
+
+// Road axis lists — stored globally so traffic can use them
+let roadColsList = [];
+let roadRowsList = [];
+
+function genMap(){
+  // 2-tile-wide roads, every 10 cols/rows
+  roadColsList = [];
+  roadRowsList = [];
+  for(let c = 9; c < COLS-2; c += 11){ roadColsList.push(c); }
+  for(let r = 8; r < ROWS-2; r += 10){ roadRowsList.push(r); }
+
+  map.fill(T_BUILDING);
+
+  // Lay 2-tile-wide roads
+  roadColsList.forEach(c => {
+    for(let r=0;r<ROWS;r++){
+      map[ti(c,  r)] = T_ROAD_V;
+      map[ti(c+1,r)] = T_ROAD_V;
+    }
+  });
+  roadRowsList.forEach(r => {
+    for(let c=0;c<COLS;c++){
+      map[ti(c,r  )] = T_ROAD_H;
+      map[ti(c,r+1)] = T_ROAD_H;
+    }
+  });
+  // Intersections (2×2)
+  roadColsList.forEach(c => roadRowsList.forEach(r => {
+    map[ti(c,  r  )] = T_ROAD_INT;
+    map[ti(c+1,r  )] = T_ROAD_INT;
+    map[ti(c,  r+1)] = T_ROAD_INT;
+    map[ti(c+1,r+1)] = T_ROAD_INT;
+  }));
+
+  // Pavement: 1-tile border around roads on building side
+  const isRoad = (c,r) => {
+    if(c<0||c>=COLS||r<0||r>=ROWS) return false;
+    return map[ti(c,r)]===T_ROAD_H||map[ti(c,r)]===T_ROAD_V||map[ti(c,r)]===T_ROAD_INT;
+  };
+  for(let r=0;r<ROWS;r++){
+    for(let c=0;c<COLS;c++){
+      if(map[ti(c,r)]!==T_BUILDING) continue;
+      if(isRoad(c-1,r)||isRoad(c+1,r)||isRoad(c,r-1)||isRoad(c,r+1))
+        map[ti(c,r)] = T_PAVEMENT;
+    }
+  }
+
+  // Parks — 3×3 patches in building zones
+  const parkSeeds = [[15,12],[50,22],[24,48],[60,55],[8,38],[44,38]];
+  parkSeeds.forEach(([pc,pr]) => {
+    for(let dr=0;dr<3;dr++) for(let dc=0;dc<3;dc++){
+      const nc=pc+dc, nr=pr+dr;
+      if(nc>=0&&nc<COLS&&nr>=0&&nr<ROWS&&
+        (map[ti(nc,nr)]===T_BUILDING||map[ti(nc,nr)]===T_PAVEMENT))
+        map[ti(nc,nr)] = T_PARK;
+    }
+  });
+
+  // District map
+  for(let r=0;r<ROWS;r++){
+    for(let c=0;c<COLS;c++){
+      for(let d=0;d<DISTRICTS.length;d++){
+        const di = DISTRICTS[d];
+        if(r>=di.r&&r<=di.rr&&c>=di.c&&c<=di.cc){ dmap[ti(c,r)]=d; break; }
+      }
+    }
+  }
+
+  // Building metadata — now buildings span multiple tiles
+  // Mark building "blocks": find top-left corner of each contiguous building rect
+  const visited = new Uint8Array(COLS*ROWS);
+  for(let r=0;r<ROWS;r++){
+    for(let c=0;c<COLS;c++){
+      if(map[ti(c,r)]!==T_BUILDING||visited[ti(c,r)]) continue;
+      // Flood-fill to find extent (limit 6×6)
+      let w=1,h2=1;
+      while(c+w<COLS&&w<6&&map[ti(c+w,r)]===T_BUILDING) w++;
+      while(r+h2<ROWS&&h2<6&&map[ti(c,r+h2)]===T_BUILDING) h2++;
+      const bh = 0.8 + Math.random()*3;
+      const d  = dmap[ti(c,r)];
+      const windows = [];
+      // Windows scaled to block size
+      const wCount = w*h2*2;
+      for(let i=0;i<wCount;i++){
+        windows.push({
+          dx: 4 + Math.floor(Math.random()*(w*TILE-10)),
+          dy: 4 + Math.floor(Math.random()*(h2*TILE-10)),
+          on: Math.random()>0.3,
+          phase: Math.random()*Math.PI*2,
+        });
+      }
+      // Store on top-left tile, mark all tiles in block
+      bdata[ti(c,r)] = { w, h:h2, bh, d, windows, isRoot:true };
+      for(let dr=0;dr<h2;dr++) for(let dc=0;dc<w;dc++){
+        visited[ti(c+dc,r+dr)]=1;
+        if(dc>0||dr>0) bdata[ti(c+dc,r+dr)] = { root:[c,r] };
+      }
+    }
+  }
+}
+genMap();
+
+// ─── CAMERA ─────────────────────────────────────────────────────────
+const cam = {
+  x: 0, y: 0,   // world position of top-left corner
+  targetX: 0, targetY: 0,
+  zoom: 1,
+  follow(wx, wy){
+    this.targetX = wx - W/2;
+    this.targetY = wy - H/2;
+  },
+  update(dt){
+    const spd = 8;
+    this.x += (this.targetX - this.x) * Math.min(1, spd*dt);
+    this.y += (this.targetY - this.y) * Math.min(1, spd*dt);
+    // Clamp to map
+    this.x = Math.max(0, Math.min(MW - W, this.x));
+    this.y = Math.max(0, Math.min(MH - H, this.y));
+  },
+  // World → screen
+  ws(wx, wy){ return { x: wx - this.x, y: wy - this.y }; },
+  // Screen → world
+  sw(sx, sy){ return { x: sx + this.x, y: sy + this.y }; },
+  // Is world rect visible?
+  visible(wx, wy, ww, wh){
+    const sx = wx - this.x, sy = wy - this.y;
+    return sx < W+TILE*2 && sx+ww > -TILE && sy < H+TILE*2 && sy+wh > -TILE;
+  }
+};
+
+// ─── PLAYER ─────────────────────────────────────────────────────────
+const player = {
+  // World pixel position (centre of sprite)
+  x: 9 * TILE + TILE/2,
+  y: 6 * TILE + TILE/2,
+  speed: 90,    // px/sec
+  dir: 2,       // 0=up 1=right 2=down 3=left
+  moving: false,
+  animFrame: 0,
+  animTimer: 0,
+  ANIM_RATE: 0.12,
+
+  update(dt, keys){
+    let dx = 0, dy = 0;
+    if(keys['ArrowUp']   ||keys['w']||keys['W']) dy -= 1;
+    if(keys['ArrowDown'] ||keys['s']||keys['S']) dy += 1;
+    if(keys['ArrowLeft'] ||keys['a']||keys['A']) dx -= 1;
+    if(keys['ArrowRight']||keys['d']||keys['D']) dx += 1;
+
+    this.moving = (dx!==0||dy!==0);
+
+    if(this.moving){
+      // Normalise diagonal
+      if(dx!==0&&dy!==0){ dx*=0.707; dy*=0.707; }
+      if(dy<0) this.dir=0;
+      else if(dy>0) this.dir=2;
+      else if(dx<0) this.dir=3;
+      else if(dx>0) this.dir=1;
+
+      const nx = this.x + dx*this.speed*dt;
+      const ny = this.y + dy*this.speed*dt;
+
+      // Collision: can't walk into building tiles
+      if(this.canWalk(nx, this.y)) this.x = nx;
+      if(this.canWalk(this.x, ny)) this.y = ny;
+
+      // Clamp to map
+      this.x = Math.max(TILE/2, Math.min(MW - TILE/2, this.x));
+      this.y = Math.max(TILE/2, Math.min(MH - TILE/2, this.y));
+
+      this.animTimer += dt;
+      if(this.animTimer >= this.ANIM_RATE){
+        this.animTimer = 0;
+        this.animFrame = (this.animFrame+1)%4;
+      }
+    } else {
+      this.animFrame = 0;
+      this.animTimer = 0;
+    }
+  },
+
+  canWalk(wx, wy){
+    // Check all four corners of the player's collision box (8px radius)
+    const R = 8;
+    const corners = [
+      [wx-R, wy-R],[wx+R, wy-R],
+      [wx-R, wy+R],[wx+R, wy+R],
+    ];
+    for(const [cx,cy] of corners){
+      const tc = Math.floor(cx/TILE);
+      const tr = Math.floor(cy/TILE);
+      if(tc<0||tc>=COLS||tr<0||tr>=ROWS) return false;
+      const t = map[ti(tc,tr)];
+      if(t===T_BUILDING) return false;
+    }
+    return true;
+  },
+
+  get tileC(){ return Math.floor(this.x/TILE); },
+  get tileR(){ return Math.floor(this.y/TILE); },
+  get districtIdx(){ return dmap[ti(this.tileC, this.tileR)]; },
+};
+
+// ─── INPUT ──────────────────────────────────────────────────────────
+const keys = {};
+window.addEventListener('keydown', e => { keys[e.key] = true; });
+window.addEventListener('keyup',   e => { keys[e.key] = false; });
+
+// ─── TIME SYSTEM ────────────────────────────────────────────────────
+const clock = {
+  elapsed: 0, // real seconds within current 08:00–20:00 cycle
+  get gameHour(){
+    return SHIFT_START_HOUR + this.elapsed / REAL_PER_GAME_HOUR;
+  },
+  get display(){
+    const gh = Math.min(this.gameHour, SHIFT_END_HOUR - 1e-6);
+    const h = Math.floor(gh);
+    const m = Math.floor((gh % 1) * 60);
+    return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+  },
+  // 0=day, ~0.65=max evening (readable against fog; snaps to morning at cycle wrap)
+  get nightAlpha(){
+    const h = this.gameHour;
+    if(h < 17) return 0;
+    if(h < 19) return ((h - 17) / 2) * 0.42;
+    if(h < 20) return 0.42 + (h - 19) * 0.22;
+    return 0;
+  },
+  update(dt){
+    this.elapsed += dt;
+    const cycle = SHIFT_HOURS * REAL_PER_GAME_HOUR;
+    while(this.elapsed >= cycle) this.elapsed -= cycle;
+  }
+};
+
+// Pre-render static map to offscreen canvas for performance
+function buildMapCache(){
+  mapCanvas = document.createElement('canvas');
+  mapCanvas.width  = MW;
+  mapCanvas.height = MH;
+  mapCtx = mapCanvas.getContext('2d');
+  renderStaticMap(mapCtx);
+  mapDirty = false;
+}
+
+function renderStaticMap(c){
+  c.fillStyle = '#080c12';
+  c.fillRect(0,0,MW,MH);
+
+  // Roads and ground tiles first
+  for(let r=0;r<ROWS;r++){
+    for(let col=0;col<COLS;col++){
+      const t = map[ti(col,r)];
+      const x = col*TILE, y = r*TILE;
+      const d = dmap[ti(col,r)];
+      const dc= DISTRICTS[d].color;
+
+      if(t===T_ROAD_H||t===T_ROAD_V||t===T_ROAD_INT){
+        // Asphalt — slightly varied tone
+        const tone = 18 + ((col*3+r*7)%5);
+        c.fillStyle=`rgb(${tone},${tone+3},${tone+8})`;
+        c.fillRect(x,y,TILE,TILE);
+        // Subtle asphalt grain
+        c.fillStyle='rgba(0,0,0,0.08)';
+        c.fillRect(x,y,TILE/2,TILE/2);
+        c.fillRect(x+TILE/2,y+TILE/2,TILE/2,TILE/2);
+      } else if(t===T_PAVEMENT){
+        // Paving slab — district-tinted
+        const br = 22+dc[0]*0.06|0, bg = 26+dc[1]*0.06|0, bb = 34+dc[2]*0.07|0;
+        c.fillStyle=`rgb(${br},${bg},${bb})`;
+        c.fillRect(x,y,TILE,TILE);
+        // Slab grid lines
+        c.strokeStyle='rgba(0,0,0,0.18)'; c.lineWidth=0.5;
+        c.strokeRect(x+0.5,y+0.5,TILE-1,TILE-1);
+        // Slab highlight edge
+        c.strokeStyle=`rgba(${br+20},${bg+20},${bb+20},0.2)`; c.lineWidth=0.5;
+        c.beginPath(); c.moveTo(x,y); c.lineTo(x+TILE,y); c.stroke();
+        c.beginPath(); c.moveTo(x,y); c.lineTo(x,y+TILE); c.stroke();
+      } else if(t===T_PARK){
+        c.fillStyle='#0a1c0e'; c.fillRect(x,y,TILE,TILE);
+        // Rich grass — layered greens
+        c.fillStyle='rgba(15,55,22,0.7)'; c.fillRect(x,y,TILE,TILE);
+        c.fillStyle='rgba(22,75,32,0.5)'; c.fillRect(x+2,y+2,TILE-4,TILE-4);
+        // Blade clusters
+        c.fillStyle='rgba(28,90,38,0.6)';
+        for(let i=0;i<5;i++){
+          c.fillRect(x+2+i*7, y+3+(i%3)*6, 2, 5);
+          c.fillRect(x+5+i*6, y+20+(i%2)*8, 3, 4);
+        }
+      }
+    }
+  }
+
+  // Crosswalk stripes at intersections
+  roadColsList.forEach(rc => {
+    roadRowsList.forEach(rr => {
+      const ix = rc*TILE, iy = rr*TILE;
+      const iw = 2*TILE, ih = 2*TILE;
+      c.fillStyle='rgba(255,255,255,0.07)';
+      // North crosswalk (above intersection)
+      for(let s=0;s<iw;s+=5){
+        c.fillRect(ix+s, iy-8, 3, 7);
+      }
+      // South crosswalk
+      for(let s=0;s<iw;s+=5){
+        c.fillRect(ix+s, iy+ih+1, 3, 7);
+      }
+      // West crosswalk
+      for(let s=0;s<ih;s+=5){
+        c.fillRect(ix-8, iy+s, 7, 3);
+      }
+      // East crosswalk
+      for(let s=0;s<ih;s+=5){
+        c.fillRect(ix+iw+1, iy+s, 7, 3);
+      }
+    });
+  });
+
+  // Road lane markings
+  const laneColor = 'rgba(255,255,255,0.06)';
+  c.strokeStyle=laneColor; c.lineWidth=1;
+  c.setLineDash([8,12]);
+  roadColsList.forEach(col => {
+    // Centre dashes on each lane
+    const lx = col*TILE + TILE/2;
+    c.beginPath(); c.moveTo(lx,0); c.lineTo(lx,MH); c.stroke();
+    const rx = (col+1)*TILE + TILE/2;
+    c.beginPath(); c.moveTo(rx,0); c.lineTo(rx,MH); c.stroke();
+  });
+  roadRowsList.forEach(r => {
+    const ty = r*TILE + TILE/2;
+    c.beginPath(); c.moveTo(0,ty); c.lineTo(MW,ty); c.stroke();
+    const by = (r+1)*TILE + TILE/2;
+    c.beginPath(); c.moveTo(0,by); c.lineTo(MW,by); c.stroke();
+  });
+  c.setLineDash([]);
+  // Road edge kerb lines
+  c.strokeStyle='rgba(60,90,120,0.35)'; c.lineWidth=1;
+  roadColsList.forEach(col => {
+    c.beginPath(); c.moveTo(col*TILE,0); c.lineTo(col*TILE,MH); c.stroke();
+    c.beginPath(); c.moveTo((col+2)*TILE,0); c.lineTo((col+2)*TILE,MH); c.stroke();
+  });
+  roadRowsList.forEach(r => {
+    c.beginPath(); c.moveTo(0,r*TILE); c.lineTo(MW,r*TILE); c.stroke();
+    c.beginPath(); c.moveTo(0,(r+2)*TILE); c.lineTo(MW,(r+2)*TILE); c.stroke();
+  });
+
+  // Buildings — draw each block root only
+  for(let r=0;r<ROWS;r++){
+    for(let col=0;col<COLS;col++){
+      const bd = bdata[ti(col,r)];
+      if(!bd||!bd.isRoot) continue;
+      const {w,h:bh2,bh,d} = bd;
+      const x = col*TILE, y = r*TILE;
+      const bw = w*TILE, bHH = bh2*TILE;
+      const dc = DISTRICTS[d].color;
+      const depth = Math.min(8, bh*2.5); // shadow depth based on height
+
+      // Drop shadow (south-east offset)
+      c.fillStyle='rgba(0,0,0,0.45)';
+      c.fillRect(x+depth, y+depth, bw, bHH);
+
+      // Wall base — district-tinted dark
+      const wallR = 10+dc[0]*0.06|0, wallG = 14+dc[1]*0.06|0, wallB = 20+dc[2]*0.08|0;
+      c.fillStyle=`rgb(${wallR},${wallG},${wallB})`;
+      c.fillRect(x,y,bw,bHH);
+
+      // Isometric top face (lighter)
+      const topR = wallR+8, topG = wallG+8, topB = wallB+12;
+      c.fillStyle=`rgb(${topR},${topG},${topB})`;
+      c.fillRect(x,y,bw,4);   // top edge
+      c.fillRect(x,y,3,bHH);  // left edge
+
+      // Roof — slightly different shade
+      c.fillStyle=`rgb(${wallR+4},${wallG+6},${wallB+14})`;
+      c.fillRect(x+3,y+3,bw-6,4);
+
+      // Outer border
+      c.strokeStyle=`rgba(${dc[0]/2|0},${80+dc[1]/3|0},${100+dc[2]/3|0},0.12)`;
+      c.lineWidth=0.5; c.strokeRect(x+0.5,y+0.5,bw-1,bHH-1);
+
+      // Antenna on tall buildings
+      if(bh>2.5){
+        const ax=x+bw/2, ay=y;
+        c.strokeStyle='rgba(180,30,30,0.5)'; c.lineWidth=1;
+        c.beginPath(); c.moveTo(ax,ay); c.lineTo(ax,ay-10); c.stroke();
+        c.fillStyle='rgba(255,50,50,0.7)';
+        c.beginPath(); c.arc(ax,ay-10,2,0,Math.PI*2); c.fill();
+      }
+
+      // Horizontal window-band lines (facade detail)
+      const floors = Math.max(1, Math.floor(bHH/14));
+      for(let f=1;f<floors;f++){
+        const fy = y + f*(bHH/floors);
+        c.strokeStyle=`rgba(0,0,0,0.3)`; c.lineWidth=1;
+        c.beginPath(); c.moveTo(x,fy); c.lineTo(x+bw,fy); c.stroke();
+      }
+    }
+  }
+}
+
+// ─── TRAFFIC ─────────────────────────────────────────────────────────
+const CAR_COLORS = [
+  '#c0392b','#2980b9','#f0c040','#27ae60','#8e44ad',
+  '#e67e22','#bdc3c7','#2c3e50','#1abc9c','#e74c3c',
+];
+const cars = [];
+function initTraffic(){
+  // Horizontal cars — one per road row, both directions
+  roadRowsList.forEach(r => {
+    const laneR0 = r;      // top lane → going right
+    const laneR1 = r+1;    // bottom lane → going left
+    const color0 = CAR_COLORS[Math.floor(Math.random()*CAR_COLORS.length)];
+    const color1 = CAR_COLORS[Math.floor(Math.random()*CAR_COLORS.length)];
+    const color2 = CAR_COLORS[Math.floor(Math.random()*CAR_COLORS.length)];
+    // 2-3 cars per road
+    for(let k=0;k<3;k++){
+      cars.push({
+        x: Math.random()*MW, y: laneR0*TILE + TILE*0.28,
+        dir:'right', speed:28+Math.random()*20,
+        color: CAR_COLORS[Math.floor(Math.random()*CAR_COLORS.length)],
+        length:18, width:10, stopped:false, stopTimer:0,
+      });
+    }
+    for(let k=0;k<2;k++){
+      cars.push({
+        x: Math.random()*MW, y: laneR1*TILE + TILE*0.28,
+        dir:'left', speed:24+Math.random()*18,
+        color: CAR_COLORS[Math.floor(Math.random()*CAR_COLORS.length)],
+        length:18, width:10, stopped:false, stopTimer:0,
+      });
+    }
+  });
+  // Vertical cars — one per road col, both directions
+  roadColsList.forEach(c => {
+    for(let k=0;k<3;k++){
+      cars.push({
+        x: c*TILE + TILE*0.28, y: Math.random()*MH,
+        dir:'down', speed:26+Math.random()*18,
+        color: CAR_COLORS[Math.floor(Math.random()*CAR_COLORS.length)],
+        length:18, width:10, stopped:false, stopTimer:0,
+      });
+    }
+    for(let k=0;k<2;k++){
+      cars.push({
+        x: (c+1)*TILE + TILE*0.28, y: Math.random()*MH,
+        dir:'up', speed:22+Math.random()*20,
+        color: CAR_COLORS[Math.floor(Math.random()*CAR_COLORS.length)],
+        length:18, width:10, stopped:false, stopTimer:0,
+      });
+    }
+  });
+}
+
+function updateTraffic(dt){
+  cars.forEach(car => {
+    if(car.stopped){
+      car.stopTimer -= dt;
+      if(car.stopTimer <= 0) car.stopped = false;
+      return;
+    }
+    // Occasionally stop at intersections
+    if(Math.random() < 0.0003) { car.stopped=true; car.stopTimer=1+Math.random()*2; return; }
+    switch(car.dir){
+      case 'right': car.x += car.speed*dt; if(car.x>MW) car.x=-car.length; break;
+      case 'left':  car.x -= car.speed*dt; if(car.x<-car.length) car.x=MW; break;
+      case 'down':  car.y += car.speed*dt; if(car.y>MH) car.y=-car.length; break;
+      case 'up':    car.y -= car.speed*dt; if(car.y<-car.length) car.y=MH; break;
+    }
+  });
+}
+
+function drawCar(car, t){
+  const horiz = car.dir==='right'||car.dir==='left';
+  const carL = car.length, carW = car.width;
+  let sx,sy;
+  if(horiz){ sx=car.x-cam.x; sy=car.y-cam.y; }
+  else      { sx=car.x-cam.x; sy=car.y-cam.y; }
+
+  // Cull
+  if(sx < -carL-4 || sx > W+carL+4) return;
+  if(sy < -carL-4 || sy > H+carL+4) return;
+
+  ctx.save();
+  ctx.translate(sx + (horiz?carL/2:carW/2), sy + (horiz?carW/2:carL/2));
+  if(!horiz) ctx.rotate(Math.PI/2);
+  if(car.dir==='left'||car.dir==='up') ctx.scale(-1,1);
+
+  // Body shadow
+  ctx.fillStyle='rgba(0,0,0,0.35)';
+  ctx.fillRect(-carL/2+2, -carW/2+2, carL, carW);
+
+  // Main body
+  ctx.fillStyle = car.color;
+  ctx.fillRect(-carL/2, -carW/2, carL, carW);
+
+  // Roof (darker centre band)
+  ctx.fillStyle='rgba(0,0,0,0.35)';
+  ctx.fillRect(-carL/2+4, -carW/2+1, carL-8, carW-2);
+
+  // Windscreens (lighter)
+  ctx.fillStyle='rgba(180,220,255,0.45)';
+  ctx.fillRect(-carL/2+2, -carW/2+1, 4, carW-2);   // front
+  ctx.fillRect( carL/2-6, -carW/2+1, 4, carW-2);   // rear
+
+  // Headlights
+  ctx.fillStyle='rgba(255,240,180,0.95)';
+  ctx.fillRect(-carL/2,   -carW/2,   2, 2);
+  ctx.fillRect(-carL/2,    carW/2-2, 2, 2);
+  // Tail lights
+  ctx.fillStyle='rgba(255,60,60,0.9)';
+  ctx.fillRect( carL/2-2, -carW/2,   2, 2);
+  ctx.fillRect( carL/2-2,  carW/2-2, 2, 2);
+
+  // Night headlight beam
+  if(clock.nightAlpha > 0.1){
+    ctx.save();
+    const beamGrad = ctx.createLinearGradient(-carL/2, 0, -carL/2-30, 0);
+    beamGrad.addColorStop(0,`rgba(255,245,200,${clock.nightAlpha*0.25})`);
+    beamGrad.addColorStop(1,'rgba(255,245,200,0)');
+    ctx.fillStyle=beamGrad;
+    ctx.beginPath();
+    ctx.moveTo(-carL/2,   -carW/2-1);
+    ctx.lineTo(-carL/2-30, -carW/2-8);
+    ctx.lineTo(-carL/2-30,  carW/2+8);
+    ctx.lineTo(-carL/2,    carW/2+1);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  ctx.restore();
+}
+
+function drawTraffic(t){
+  cars.forEach(car => drawCar(car, t));
+}
+
+// ─── FOG OF WAR ──────────────────────────────────────────────────────
+// Ray visibility (Hotline-style: LOS blocked by buildings; facades stay readable)
+const FOV_RAYS   = 720;
+const FOV_RANGE  = 320; // max visibility radius in px (world pixels)
+// 1:1 canvas = no upscale seams when drawing the mask
+const FOG_CANVAS_W = FOV_RANGE * 2;
+const FOG_CANVAS_H = FOV_RANGE * 2;
+const FOG_OUT_ALPHA = 0.82;
+
+let fogCanvas, fogCtx;
+function initFog(){
+  fogCanvas = document.createElement('canvas');
+  fogCanvas.width  = FOG_CANVAS_W;
+  fogCanvas.height = FOG_CANVAS_H;
+  fogCtx = fogCanvas.getContext('2d');
+}
+
+// Distance along ray P+t*d (d unit) to enter axis-aligned box (first positive intersection)
+function rayEnterAABB(px, py, dx, dy, minX, minY, maxX, maxY){
+  let t0 = -Infinity, t1 = Infinity;
+  const EPS = 1e-9;
+  function clipSlab(p, d_, low, high){
+    if(Math.abs(d_) < EPS){
+      if(p < low || p > high) return false;
+      return true;
+    }
+    const inv = 1 / d_;
+    let ta = (low - p) * inv;
+    let tb = (high - p) * inv;
+    if(ta > tb) [ta, tb] = [tb, ta];
+    t0 = Math.max(t0, ta);
+    t1 = Math.min(t1, tb);
+    return t0 <= t1;
+  }
+  if(!clipSlab(px, dx, minX, maxX)) return null;
+  if(!clipSlab(py, dy, minY, maxY)) return null;
+  if(t1 < 0) return null;
+  return Math.max(0, t0);
+}
+
+function castRay(px, py, angle){
+  const dx = Math.cos(angle), dy = Math.sin(angle);
+  const step = TILE * 0.14;
+  for(let dist = 0; dist <= FOV_RANGE; dist += step){
+    const wx = px + dx * dist;
+    const wy = py + dy * dist;
+    const tc = Math.floor(wx / TILE);
+    const tr = Math.floor(wy / TILE);
+    if(tc < 0 || tc >= COLS || tr < 0 || tr >= ROWS)
+      return Math.min(dist, FOV_RANGE);
+    if(map[ti(tc, tr)] === T_BUILDING){
+      const bx0 = tc * TILE, by0 = tr * TILE;
+      const tHit = rayEnterAABB(px, py, dx, dy, bx0, by0, bx0 + TILE, by0 + TILE);
+      if(tHit != null)
+        return Math.min(Math.max(tHit - 0.25, 2), FOV_RANGE);
+      return Math.min(Math.max(dist - step, 2), FOV_RANGE);
+    }
+  }
+  return FOV_RANGE;
+}
+
+function buildFogMask(){
+  const px = player.x, py = player.y;
+  const fc = fogCtx;
+  const fw = FOG_CANVAS_W, fh = FOG_CANVAS_H;
+  const cx = fw / 2, cy = fh / 2;
+
+  fc.clearRect(0, 0, fw, fh);
+  fc.fillStyle = `rgba(12,14,18,${FOG_OUT_ALPHA})`;
+  fc.fillRect(0, 0, fw, fh);
+
+  fc.save();
+  fc.globalCompositeOperation = 'destination-out';
+  fc.beginPath();
+  for(let i = 0; i <= FOV_RAYS; i++){
+    const angle = (i / FOV_RAYS) * Math.PI * 2;
+    const dist = castRay(px, py, angle);
+    const vx = cx + Math.cos(angle) * dist;
+    const vy = cy + Math.sin(angle) * dist;
+    if(i === 0) fc.moveTo(vx, vy);
+    else fc.lineTo(vx, vy);
+  }
+  fc.closePath();
+  fc.fillStyle = 'rgba(255,255,255,1)';
+  fc.fill();
+
+  const featherOut = FOV_RANGE * 0.88;
+  const grad = fc.createRadialGradient(cx, cy, FOV_RANGE * 0.35, cx, cy, featherOut);
+  grad.addColorStop(0, 'rgba(0,0,0,0)');
+  grad.addColorStop(0.72, 'rgba(0,0,0,0.35)');
+  grad.addColorStop(1, 'rgba(0,0,0,0.95)');
+  fc.globalCompositeOperation = 'destination-in';
+  fc.fillStyle = grad;
+  fc.fillRect(0, 0, fw, fh);
+  fc.restore();
+}
+
+function drawFog(){
+  buildFogMask();
+  const sx = cam.ws(player.x, player.y);
+  const dx = sx.x - FOV_RANGE;
+  const dy = sx.y - FOV_RANGE;
+  ctx.drawImage(fogCanvas, dx, dy);
+  ctx.fillStyle = `rgba(12,14,18,${FOG_OUT_ALPHA})`;
+  if(dx > 0) ctx.fillRect(0, 0, dx, H);
+  if(dx + FOV_RANGE * 2 < W) ctx.fillRect(dx + FOV_RANGE * 2, 0, W - (dx + FOV_RANGE * 2), H);
+  const topH = Math.max(0, dy);
+  if(topH > 0) ctx.fillRect(dx, 0, FOV_RANGE * 2, topH);
+  const botTop = dy + FOV_RANGE * 2;
+  if(botTop < H) ctx.fillRect(dx, botTop, FOV_RANGE * 2, H - botTop);
+}
+function drawWorld(t){
+  if(!mapCanvas) buildMapCache();
+
+  const sx = Math.max(0, Math.floor(cam.x)),
+        sy = Math.max(0, Math.floor(cam.y)),
+        sw = Math.min(MW - sx, W),
+        sh = Math.min(MH - sy, H);
+  ctx.drawImage(mapCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
+
+  drawDynamicTiles(t);
+  drawTraffic(t);
+
+  const na = clock.nightAlpha;
+  if(na > 0){
+    ctx.fillStyle = `rgba(0,5,20,${na})`;
+    ctx.fillRect(0,0,W,H);
+    drawStreetLamps(na, t);
+  }
+}
+
+function drawDynamicTiles(t){
+  const c0 = Math.max(0, Math.floor(cam.x/TILE)-1);
+  const c1 = Math.min(COLS-1, Math.ceil((cam.x+W)/TILE)+1);
+  const r0 = Math.max(0, Math.floor(cam.y/TILE)-1);
+  const r1 = Math.min(ROWS-1, Math.ceil((cam.y+H)/TILE)+1);
+
+  for(let r=r0;r<=r1;r++){
+    for(let c=c0;c<=c1;c++){
+      const bd = bdata[ti(c,r)];
+      if(!bd||!bd.isRoot||!bd.windows.length) continue;
+      const wx = c*TILE - cam.x;
+      const wy = r*TILE - cam.y;
+      bd.windows.forEach(win => {
+        if(!win.on) return;
+        const flicker = 0.5 + 0.5*(0.5+0.5*Math.sin(t*5+win.phase));
+        ctx.fillStyle = `rgba(255,215,100,${flicker*0.6})`;
+        ctx.fillRect(wx+win.dx, wy+win.dy, 3, 3);
+        ctx.fillStyle = `rgba(255,200,80,${flicker*0.12})`;
+        ctx.fillRect(wx+win.dx-2, wy+win.dy-2, 7, 7);
+      });
+    }
+  }
+}
+
+function drawStreetLamps(nightAlpha, t){
+  // Draw at road-building corners
+  const c0 = Math.max(0, Math.floor(cam.x/TILE)-2);
+  const c1 = Math.min(COLS-1, Math.ceil((cam.x+W)/TILE)+2);
+  const r0 = Math.max(0, Math.floor(cam.y/TILE)-2);
+  const r1 = Math.min(ROWS-1, Math.ceil((cam.y+H)/TILE)+2);
+
+  for(let r=r0;r<=r1;r++){
+    for(let c=c0;c<=c1;c++){
+      if(map[ti(c,r)] !== T_PAVEMENT) continue;
+      const lx = c*TILE + TILE/2 - cam.x;
+      const ly = r*TILE + TILE/2 - cam.y;
+      const glow = ctx.createRadialGradient(lx,ly,0,lx,ly,30*nightAlpha+8);
+      glow.addColorStop(0,`rgba(255,220,120,${0.2*nightAlpha})`);
+      glow.addColorStop(1,'rgba(0,0,0,0)');
+      ctx.fillStyle = glow;
+      ctx.beginPath(); ctx.arc(lx,ly,30*nightAlpha+8,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle = `rgba(255,235,160,${0.7*nightAlpha})`;
+      ctx.beginPath(); ctx.arc(lx,ly,1.5,0,Math.PI*2); ctx.fill();
+    }
+  }
+}
+
+function drawPlayer(t){
+  const sp = cam.ws(player.x, player.y);
+  const x  = sp.x, y = sp.y;
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.beginPath();
+  ctx.ellipse(x, y+8, 6, 3, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // Body — simple pixel-art-style shape
+  const bob = player.moving ? Math.sin(t*12)*1.5 : 0;
+  const dirs = [[0,-1],[1,0],[0,1],[-1,0]]; // up right down left
+  const [fdx, fdy] = dirs[player.dir];
+
+  // Legs (walking anim)
+  if(player.moving){
+    const legSwing = Math.sin(t*14) * 4;
+    ctx.strokeStyle = '#1a3a6a';
+    ctx.lineWidth = 3;
+    ctx.lineCap = 'round';
+    // Left leg
+    ctx.beginPath();
+    ctx.moveTo(x-2, y+4+bob);
+    ctx.lineTo(x-2 + legSwing*0.5, y+10+bob);
+    ctx.stroke();
+    // Right leg
+    ctx.beginPath();
+    ctx.moveTo(x+2, y+4+bob);
+    ctx.lineTo(x+2 - legSwing*0.5, y+10+bob);
+    ctx.stroke();
+  } else {
+    ctx.strokeStyle = '#1a3a6a';
+    ctx.lineWidth = 3;
+    ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(x-2,y+4); ctx.lineTo(x-2,y+10); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x+2,y+4); ctx.lineTo(x+2,y+10); ctx.stroke();
+  }
+
+  // Torso — dark blue uniform
+  ctx.fillStyle = '#1e4080';
+  ctx.beginPath();
+  ctx.moveTo(x-5+2, y-6+bob);
+  ctx.lineTo(x+5-2,  y-6+bob);
+  ctx.quadraticCurveTo(x+5, y-6+bob, x+5, y-6+bob+2);
+  ctx.lineTo(x+5,  y+5+bob-2);
+  ctx.quadraticCurveTo(x+5, y+5+bob, x+5-2, y+5+bob);
+  ctx.lineTo(x-5+2, y+5+bob);
+  ctx.quadraticCurveTo(x-5, y+5+bob, x-5, y+5+bob-2);
+  ctx.lineTo(x-5,  y-6+bob+2);
+  ctx.quadraticCurveTo(x-5, y-6+bob, x-5+2, y-6+bob);
+  ctx.closePath();
+  ctx.fill();
+
+  // Badge glint
+  ctx.fillStyle = '#e8d5a0';
+  ctx.beginPath(); ctx.arc(x+2, y-3+bob, 1.5, 0, Math.PI*2); ctx.fill();
+
+  // Head
+  ctx.fillStyle = '#c8a882';
+  ctx.beginPath();
+  ctx.arc(x, y-11+bob, 5, 0, Math.PI*2);
+  ctx.fill();
+
+  // Hat
+  ctx.fillStyle = '#152e5a';
+  ctx.fillRect(x-6, y-17+bob, 12, 4);
+  ctx.fillRect(x-4, y-21+bob, 8, 5);
+  ctx.fillStyle = '#e8d5a0';
+  ctx.fillRect(x-4, y-16+bob, 8, 1); // hat band
+
+  // Direction indicator (tiny arrow above head)
+  ctx.fillStyle = 'rgba(232,213,160,0.4)';
+  ctx.beginPath();
+  ctx.moveTo(x + fdx*10, y-22+bob + fdy*10);
+  ctx.lineTo(x + fdx*10 - fdy*3, y-22+bob + fdy*10 + fdx*3);
+  ctx.lineTo(x + fdx*10 + fdy*3, y-22+bob + fdy*10 - fdx*3);
+  ctx.closePath();
+  ctx.fill();
+}
+
+// ─── VIGNETTE ────────────────────────────────────────────────────────
+function drawVignette(){
+  const grad = ctx.createRadialGradient(W/2,H/2,H*0.28,W/2,H/2,H*0.8);
+  grad.addColorStop(0,'rgba(0,0,0,0)');
+  grad.addColorStop(1,'rgba(0,0,0,0.5)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0,0,W,H);
+}
+
+// Scanlines
+function drawScanlines(){
+  for(let sy=0;sy<H;sy+=3){
+    ctx.fillStyle='rgba(0,0,0,0.04)';
+    ctx.fillRect(0,sy,W,1);
+  }
+}
+
+// ─── HUD UPDATE ──────────────────────────────────────────────────────
+let lastZoneIdx = -1;
+function updateHUD(){
+  document.getElementById('clock').textContent = clock.display;
+  const di = player.districtIdx;
+  if(di !== lastZoneIdx && di >= 0){
+    lastZoneIdx = di;
+    const dist = DISTRICTS[di];
+    document.getElementById('zone-name').textContent  = dist.name.toUpperCase();
+    document.getElementById('zone-trust').textContent = `Trust: ${dist.trust}%`;
+    toast(`Entering ${dist.name}`);
+  }
+}
+
+let toastTimer = 0;
+function toast(msg){
+  const el = document.getElementById('notify');
+  el.textContent = msg;
+  el.style.opacity = '1';
+  toastTimer = 2.5;
+}
+function tickToast(dt){
+  if(toastTimer > 0){
+    toastTimer -= dt;
+    if(toastTimer <= 0){
+      toastTimer = 0;
+      document.getElementById('notify').style.opacity = '0';
+    }
+  }
+}
+
+// ─── MAIN LOOP ───────────────────────────────────────────────────────
+let last = 0;
+function loop(ts){
+  const dt = Math.min((ts - last)/1000, 0.05);
+  last = ts;
+
+  // Update
+  clock.update(dt);
+  player.update(dt, keys);
+  cam.follow(player.x, player.y);
+  cam.update(dt);
+  updateTraffic(dt);
+  tickToast(dt);
+
+  // Draw
+  ctx.clearRect(0,0,W,H);
+  drawWorld(ts/1000);
+  drawPlayer(ts/1000);
+  drawFog();
+  drawScanlines();
+  drawVignette();
+
+  // HUD (DOM)
+  updateHUD();
+
+  requestAnimationFrame(loop);
+}
+
+// Initial toast
+initTraffic();
+initFog();
+setTimeout(() => toast('Shift begins. Walk your beat.'), 500);
+requestAnimationFrame(loop);
+</script>
+</body>
 </html>
