@@ -74,6 +74,33 @@ canvas{display:block;}
 }
 #controls span{color:rgba(232,213,160,0.6);}
 
+/* Hotbar */
+#hotbar{
+  position:absolute;bottom:52px;left:50%;transform:translateX(-50%);
+  display:flex;gap:6px;padding:8px 12px;
+  background:rgba(8,12,18,0.88);
+  border:1px solid rgba(255,255,255,0.08);
+  border-radius:6px;
+  backdrop-filter:blur(8px);
+  pointer-events:none;
+}
+.hotbar-slot{
+  width:44px;height:44px;border-radius:4px;
+  border:1px solid rgba(255,255,255,0.12);
+  background:rgba(0,0,0,0.35);
+  display:flex;align-items:center;justify-content:center;
+  font-family:'Share Tech Mono',monospace;font-size:10px;color:rgba(255,255,255,0.35);
+  position:relative;
+}
+.hotbar-slot.has-item{color:rgba(232,213,160,0.75);}
+.hotbar-slot.selected{
+  border-color:rgba(232,213,160,0.55);
+  box-shadow:0 0 0 1px rgba(232,213,160,0.2), inset 0 0 12px rgba(232,213,160,0.08);
+}
+.hotbar-slot kbd{
+  position:absolute;top:2px;left:4px;font-size:8px;opacity:0.45;
+}
+
 /* Notify toast */
 #notify{
   position:absolute;bottom:50px;left:50%;transform:translateX(-50%);
@@ -109,8 +136,9 @@ canvas{display:block;}
       <span id="zone-trust">Trust: —</span>
     </div>
   </div>
+  <div id="hotbar"></div>
   <div id="controls">
-    <span>WASD / ARROWS</span> move &nbsp;·&nbsp; more controls coming next chunk
+    <span>WASD / ARROWS</span> move · <span>E</span> interact · <span>1–8</span> hotbar
   </div>
   <div id="notify"></div>
 </div>
@@ -152,6 +180,9 @@ const T_ROAD_INT = 3;
 const T_PARK     = 4;
 const T_PAVEMENT = 5;
 
+// Civic lot (carved after roads; metadata applied post-build)
+const PRECINCT_LOT = { c0:4, r0:3, w:4, h:3 }; // door sits on row r0+h (south pavement)
+
 // District definitions (bounding tile rect + name + color tint)
 const DISTRICTS = [
   { name:'Millbank Row',  r:0,  c:0,  rr:39, cc:39, color:[40,80,160],  trust:65 },
@@ -164,7 +195,302 @@ let map   = new Uint8Array(COLS * ROWS);
 let dmap  = new Uint8Array(COLS * ROWS); // district index per tile
 let bdata = []; // building metadata array
 
+/** @type {{ id:string, c:number, r:number, kind:'precinct'|'store'|'house', locked:boolean, interiorId:string, label:string }[]} */
+let entrances = [];
+
+let gameMode = 'street'; // 'street' | 'interior'
+const interior = {
+  id: null,
+  label: '',
+  exitWorld: null,
+  playerX: 0,
+  playerY: 0,
+  wTiles: 12,
+  hTiles: 10,
+  walls: null, // Uint8Array 1=solid
+};
+
+const INTERIOR_PRESETS = {
+  precinct_hall: { wTiles:14, hTiles:11, label:'Precinct lobby' },
+  store_small:   { wTiles:10, hTiles:8,  label:'Shop floor' },
+  house_small:   { wTiles:9,  hTiles:8,  label:'Residence' },
+};
+
 function ti(c, r){ return r * COLS + c; }
+
+function stampPrecinctLot(){
+  const { c0, r0, w, h } = PRECINCT_LOT;
+  for(let dr = 0; dr < h; dr++){
+    for(let dc = 0; dc < w; dc++){
+      map[ti(c0 + dc, r0 + dr)] = T_BUILDING;
+    }
+  }
+  const southRow = r0 + h;
+  for(let dc = 0; dc < w; dc++){
+    const cx = c0 + dc;
+    if(cx >= 0 && cx < COLS && southRow < ROWS)
+      map[ti(cx, southRow)] = T_PAVEMENT;
+  }
+}
+
+function rebuildBuildingBlocks(){
+  bdata = [];
+  const visited = new Uint8Array(COLS * ROWS);
+  for(let r = 0; r < ROWS; r++){
+    for(let c = 0; c < COLS; c++){
+      if(map[ti(c, r)] !== T_BUILDING || visited[ti(c, r)]) continue;
+      let w = 1, h2 = 1;
+      while(c + w < COLS && w < 6 && map[ti(c + w, r)] === T_BUILDING) w++;
+      while(r + h2 < ROWS && h2 < 6 && map[ti(c, r + h2)] === T_BUILDING) h2++;
+      const bh = 0.8 + Math.random() * 3;
+      const d  = dmap[ti(c, r)];
+      const windows = [];
+      const wCount = w * h2 * 2;
+      for(let i = 0; i < wCount; i++){
+        windows.push({
+          dx: 4 + Math.floor(Math.random() * (w * TILE - 10)),
+          dy: 4 + Math.floor(Math.random() * (h2 * TILE - 10)),
+          on: Math.random() > 0.3,
+          phase: Math.random() * Math.PI * 2,
+        });
+      }
+      bdata[ti(c, r)] = { w, h:h2, bh, d, windows, isRoot:true };
+      for(let dr = 0; dr < h2; dr++) for(let dc = 0; dc < w; dc++){
+        visited[ti(c + dc, r + dr)] = 1;
+        if(dc > 0 || dr > 0) bdata[ti(c + dc, r + dr)] = { root:[c, r] };
+      }
+    }
+  }
+  const { c0, r0, w:pw, h:ph } = PRECINCT_LOT;
+  const rootI = ti(c0, r0);
+  if(bdata[rootI] && bdata[rootI].isRoot){
+    bdata[rootI].kind = 'precinct';
+    bdata[rootI].bh = 2.2;
+    bdata[rootI].windows = [
+      { dx:18, dy:14, on:true, phase:0 },
+      { dx:52, dy:14, on:true, phase:1 },
+      { dx:86, dy:14, on:true, phase:2 },
+      { dx:34, dy:36, on:false, phase:0 },
+      { dx:78, dy:36, on:true, phase:0.5 },
+    ];
+  }
+}
+
+function pointInPrecinctFootprint(c, r){
+  const { c0, r0, w, h } = PRECINCT_LOT;
+  return c >= c0 && c < c0 + w && r >= r0 && r <= r0 + h;
+}
+
+function seedRetailEntrances(){
+  entrances = [];
+  const { c0, r0, w, h } = PRECINCT_LOT;
+  const doorC = c0 + Math.floor(w / 2);
+  const doorR = r0 + h;
+  entrances.push({
+    id:'ent_precinct',
+    c: doorC,
+    r: doorR,
+    kind:'precinct',
+    locked:false,
+    interiorId:'precinct_hall',
+    label:'Precinct 9',
+  });
+
+  let stores = 0, houses = 0;
+  const maxStores = 18, maxHouses = 14;
+  for(let r = 1; r < ROWS - 1; r++){
+    for(let c = 0; c < COLS; c++){
+      if(map[ti(c, r)] !== T_PAVEMENT) continue;
+      if(map[ti(c, r - 1)] !== T_BUILDING) continue;
+      if(pointInPrecinctFootprint(c, r) || pointInPrecinctFootprint(c, r - 1)) continue;
+      // Prefer strips away from intersections (rough heuristic)
+      const jitter = ((c * 17 + r * 31) % 97) / 97;
+      if(stores < maxStores && jitter < 0.035){
+        entrances.push({
+          id:`ent_store_${stores}`,
+          c, r,
+          kind:'store',
+          locked:false,
+          interiorId:'store_small',
+          label:'Storefront',
+        });
+        stores++;
+      } else if(houses < maxHouses && jitter > 0.92){
+        entrances.push({
+          id:`ent_house_${houses}`,
+          c, r,
+          kind:'house',
+          locked:true,
+          interiorId:'house_small',
+          label:'Private residence',
+        });
+        houses++;
+      }
+    }
+  }
+}
+
+function genInteriorWalls(wT, hT){
+  const m = new Uint8Array(wT * hT);
+  const doorW = 2;
+  const dx0 = Math.floor(wT / 2) - Math.floor(doorW / 2);
+  for(let y = 0; y < hT; y++){
+    for(let x = 0; x < wT; x++){
+      const edge = x === 0 || y === 0 || x === wT - 1 || y === hT - 1;
+      const exitGap = y === hT - 1 && x >= dx0 && x < dx0 + doorW;
+      m[y * wT + x] = edge && !exitGap ? 1 : 0;
+    }
+  }
+  return m;
+}
+
+function enterInterior(ent){
+  if(ent.locked){
+    toast(`${ent.label} — locked`);
+    return;
+  }
+  const preset = INTERIOR_PRESETS[ent.interiorId];
+  if(!preset) return;
+  gameMode = 'interior';
+  interior.id = ent.interiorId;
+  interior.label = preset.label;
+  interior.exitWorld = { x: player.x, y: player.y };
+  interior.wTiles = preset.wTiles;
+  interior.hTiles = preset.hTiles;
+  interior.walls = genInteriorWalls(preset.wTiles, preset.hTiles);
+  interior.playerX = Math.floor(preset.wTiles / 2) * TILE + TILE / 2;
+  interior.playerY = (preset.hTiles - 3) * TILE + TILE / 2;
+  cam.boundW = preset.wTiles * TILE;
+  cam.boundH = preset.hTiles * TILE;
+  toast(ent.label);
+}
+
+function exitInterior(){
+  if(gameMode !== 'interior') return;
+  gameMode = 'street';
+  cam.boundW = MW;
+  cam.boundH = MH;
+  if(interior.exitWorld){
+    player.x = interior.exitWorld.x;
+    player.y = interior.exitWorld.y;
+  }
+  interior.id = null;
+  interior.walls = null;
+  interior.exitWorld = null;
+}
+
+function interiorCanWalk(nx, ny){
+  const WT = interior.wTiles, HT = interior.hTiles;
+  const R = 8;
+  const corners = [[nx-R,ny-R],[nx+R,ny-R],[nx-R,ny+R],[nx+R,ny+R]];
+  for(const [cx, cy] of corners){
+    const tx = Math.floor(cx / TILE), ty = Math.floor(cy / TILE);
+    if(tx < 0 || ty < 0 || tx >= WT || ty >= HT) return false;
+    if(interior.walls[ty * WT + tx]) return false;
+  }
+  return true;
+}
+
+function updateInterior(dt, keys){
+  let dx = 0, dy = 0;
+  if(keys['ArrowUp']   || keys['w'] || keys['W']) dy -= 1;
+  if(keys['ArrowDown'] || keys['s'] || keys['S']) dy += 1;
+  if(keys['ArrowLeft'] || keys['a'] || keys['A']) dx -= 1;
+  if(keys['ArrowRight']|| keys['d'] || keys['D']) dx += 1;
+  const spd = player.speed;
+  if(dx !== 0 && dy !== 0){ dx *= 0.707; dy *= 0.707; }
+  const nx = interior.playerX + dx * spd * dt;
+  const ny = interior.playerY + dy * spd * dt;
+  if(interiorCanWalk(nx, interior.playerY)) interior.playerX = nx;
+  if(interiorCanWalk(interior.playerX, ny)) interior.playerY = ny;
+  const WT = interior.wTiles, HT = interior.hTiles;
+  interior.playerX = Math.max(TILE/2, Math.min(WT*TILE - TILE/2, interior.playerX));
+  interior.playerY = Math.max(TILE/2, Math.min(HT*TILE - TILE/2, interior.playerY));
+}
+
+function drawInteriorScene(t){
+  const WT = interior.wTiles, HT = interior.hTiles;
+
+  ctx.fillStyle = '#0d1018';
+  ctx.fillRect(0, 0, W, H);
+
+  const ox = -cam.x, oy = -cam.y;
+  for(let y = 0; y < HT; y++){
+    for(let x = 0; x < WT; x++){
+      const wx = x * TILE + ox;
+      const wy = y * TILE + oy;
+      if(wx > W || wy > H || wx + TILE < 0 || wy + TILE < 0) continue;
+      const solid = interior.walls[y * WT + x];
+      if(!solid){
+        const g = ctx.createLinearGradient(wx, wy, wx + TILE, wy + TILE);
+        g.addColorStop(0, '#2a3142');
+        g.addColorStop(1, '#1e2433');
+        ctx.fillStyle = g;
+        ctx.fillRect(wx, wy, TILE, TILE);
+        ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+        ctx.strokeRect(wx + 0.5, wy + 0.5, TILE - 1, TILE - 1);
+      } else {
+        ctx.fillStyle = '#121620';
+        ctx.fillRect(wx, wy, TILE, TILE);
+        ctx.strokeStyle = 'rgba(232,213,160,0.08)';
+        ctx.strokeRect(wx + 0.5, wy + 0.5, TILE - 1, TILE - 1);
+      }
+    }
+  }
+
+  const dx0 = Math.floor(WT / 2) - 1;
+  const doorY = (HT - 1) * TILE;
+  for(let k = 0; k < 2; k++){
+    const wx = (dx0 + k) * TILE + ox;
+    const wy = doorY + oy;
+    const glow = 0.35 + 0.15 * Math.sin(t * 3);
+    ctx.fillStyle = `rgba(40,55,85,${glow})`;
+    ctx.fillRect(wx + 4, wy + 6, TILE - 8, TILE - 10);
+    ctx.fillStyle = `rgba(232,213,160,${0.25 + glow * 0.2})`;
+    ctx.fillRect(wx + 12, wy + 14, TILE - 24, 4);
+  }
+
+  const px = interior.playerX - cam.x;
+  const py = interior.playerY - cam.y;
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.beginPath();
+  ctx.ellipse(px, py + 8, 6, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#1e4080';
+  ctx.fillRect(px - 5, py - 8, 10, 14);
+  ctx.fillStyle = '#c8a882';
+  ctx.beginPath();
+  ctx.arc(px, py - 11, 5, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = 'rgba(232,213,160,0.35)';
+  ctx.font = '600 11px Barlow Condensed, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(interior.label.toUpperCase(), W / 2, 42);
+  ctx.font = '10px "Share Tech Mono", monospace';
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  ctx.fillText('E — EXIT · WASD MOVE', W / 2, H - 56);
+}
+
+function tryInteractStreet(){
+  let best = null, bestD = 52;
+  for(const ent of entrances){
+    const cx = ent.c * TILE + TILE / 2;
+    const cy = ent.r * TILE + TILE / 2;
+    const d = Math.hypot(player.x - cx, player.y - cy);
+    if(d < bestD){ bestD = d; best = ent; }
+  }
+  if(best) enterInterior(best);
+}
+
+function tryInteractInterior(){
+  const WT = interior.wTiles, HT = interior.hTiles;
+  const dx0 = Math.floor(WT / 2) - 1;
+  const doorCenterX = (dx0 + 1) * TILE + TILE / 2;
+  const doorCenterY = (HT - 1) * TILE + TILE * 0.55;
+  const d = Math.hypot(interior.playerX - doorCenterX, interior.playerY - doorCenterY);
+  if(d < 44) exitInterior();
+}
 
 // Road axis lists — stored globally so traffic can use them
 let roadColsList = [];
@@ -234,39 +560,19 @@ function genMap(){
     }
   }
 
-  // Building metadata — now buildings span multiple tiles
-  // Mark building "blocks": find top-left corner of each contiguous building rect
-  const visited = new Uint8Array(COLS*ROWS);
-  for(let r=0;r<ROWS;r++){
-    for(let c=0;c<COLS;c++){
-      if(map[ti(c,r)]!==T_BUILDING||visited[ti(c,r)]) continue;
-      // Flood-fill to find extent (limit 6×6)
-      let w=1,h2=1;
-      while(c+w<COLS&&w<6&&map[ti(c+w,r)]===T_BUILDING) w++;
-      while(r+h2<ROWS&&h2<6&&map[ti(c,r+h2)]===T_BUILDING) h2++;
-      const bh = 0.8 + Math.random()*3;
-      const d  = dmap[ti(c,r)];
-      const windows = [];
-      // Windows scaled to block size
-      const wCount = w*h2*2;
-      for(let i=0;i<wCount;i++){
-        windows.push({
-          dx: 4 + Math.floor(Math.random()*(w*TILE-10)),
-          dy: 4 + Math.floor(Math.random()*(h2*TILE-10)),
-          on: Math.random()>0.3,
-          phase: Math.random()*Math.PI*2,
-        });
-      }
-      // Store on top-left tile, mark all tiles in block
-      bdata[ti(c,r)] = { w, h:h2, bh, d, windows, isRoot:true };
-      for(let dr=0;dr<h2;dr++) for(let dc=0;dc<w;dc++){
-        visited[ti(c+dc,r+dr)]=1;
-        if(dc>0||dr>0) bdata[ti(c+dc,r+dr)] = { root:[c,r] };
-      }
-    }
-  }
+  stampPrecinctLot();
+  rebuildBuildingBlocks();
+  seedRetailEntrances();
+  ensurePrecinctSpawnSidewalk();
 }
 genMap();
+
+function ensurePrecinctSpawnSidewalk(){
+  const dc = PRECINCT_LOT.c0 + Math.floor(PRECINCT_LOT.w / 2);
+  const dr = PRECINCT_LOT.r0 + PRECINCT_LOT.h + 1;
+  if(dr < ROWS && map[ti(dc, dr)] === T_BUILDING)
+    map[ti(dc, dr)] = T_PAVEMENT;
+}
 
 // ─── CAMERA ─────────────────────────────────────────────────────────
 const cam = {
@@ -277,13 +583,15 @@ const cam = {
     this.targetX = wx - W/2;
     this.targetY = wy - H/2;
   },
+  boundW: MW,
+  boundH: MH,
   update(dt){
     const spd = 8;
     this.x += (this.targetX - this.x) * Math.min(1, spd*dt);
     this.y += (this.targetY - this.y) * Math.min(1, spd*dt);
-    // Clamp to map
-    this.x = Math.max(0, Math.min(MW - W, this.x));
-    this.y = Math.max(0, Math.min(MH - H, this.y));
+    const bw = this.boundW, bh = this.boundH;
+    this.x = Math.max(0, Math.min(bw - W, this.x));
+    this.y = Math.max(0, Math.min(bh - H, this.y));
   },
   // World → screen
   ws(wx, wy){ return { x: wx - this.x, y: wy - this.y }; },
@@ -298,9 +606,9 @@ const cam = {
 
 // ─── PLAYER ─────────────────────────────────────────────────────────
 const player = {
-  // World pixel position (centre of sprite)
-  x: 9 * TILE + TILE/2,
-  y: 6 * TILE + TILE/2,
+  // Spawn south of precinct doorstep (pavement)
+  x: (PRECINCT_LOT.c0 + Math.floor(PRECINCT_LOT.w / 2)) * TILE + TILE / 2,
+  y: (PRECINCT_LOT.r0 + PRECINCT_LOT.h + 1) * TILE + TILE / 2,
   speed: 90,    // px/sec
   dir: 2,       // 0=up 1=right 2=down 3=left
   moving: false,
@@ -371,8 +679,39 @@ const player = {
 
 // ─── INPUT ──────────────────────────────────────────────────────────
 const keys = {};
-window.addEventListener('keydown', e => { keys[e.key] = true; });
-window.addEventListener('keyup',   e => { keys[e.key] = false; });
+window.addEventListener('keydown', e => {
+  keys[e.key] = true;
+  if(!e.repeat && (e.key === 'e' || e.key === 'E')){
+    if(gameMode === 'street') tryInteractStreet();
+    else tryInteractInterior();
+  }
+  const num = parseInt(e.key, 10);
+  if(num >= 1 && num <= 8){
+    hotbarSelected = num - 1;
+    refreshHotbarDOM();
+  }
+});
+window.addEventListener('keyup', e => { keys[e.key] = false; });
+
+// ─── HOTBAR ───────────────────────────────────────────────────────────
+const HOTBAR_SLOTS = 8;
+let hotbarSelected = 0;
+/** Scaffold: equip slots later; labels optional */
+let hotbarItems = [
+  { label:'Radio' }, null, null, { label:'Notebook' }, null, null, null, null,
+];
+
+function refreshHotbarDOM(){
+  const root = document.getElementById('hotbar');
+  if(!root) return;
+  root.innerHTML = '';
+  for(let i = 0; i < HOTBAR_SLOTS; i++){
+    const slot = document.createElement('div');
+    slot.className = 'hotbar-slot' + (hotbarItems[i] ? ' has-item' : '') + (i === hotbarSelected ? ' selected' : '');
+    slot.innerHTML = `<kbd>${i+1}</kbd>` + (hotbarItems[i] ? hotbarItems[i].label.slice(0,3) : '—');
+    root.appendChild(slot);
+  }
+}
 
 // ─── TIME SYSTEM ────────────────────────────────────────────────────
 const clock = {
@@ -516,71 +855,171 @@ function renderStaticMap(c){
     c.beginPath(); c.moveTo(0,(r+2)*TILE); c.lineTo(MW,(r+2)*TILE); c.stroke();
   });
 
-  // Buildings — draw each block root only
-  for(let r=0;r<ROWS;r++){
-    for(let col=0;col<COLS;col++){
-      const bd = bdata[ti(col,r)];
-      if(!bd||!bd.isRoot) continue;
-      const {w,h:bh2,bh,d} = bd;
-      const x = col*TILE, y = r*TILE;
-      const bw = w*TILE, bHH = bh2*TILE;
-      const dc = DISTRICTS[d].color;
-      const depth = Math.min(10, 4 + bh * 2.2);
+  // Buildings: rendered live in drawSortedBuildings (façade tied to player row)
+}
 
-      c.fillStyle='rgba(0,0,0,0.38)';
-      c.fillRect(x+depth, y+depth, bw, bHH);
-      c.fillStyle='rgba(0,0,0,0.12)';
-      c.fillRect(x+depth*0.45, y+depth*0.45, bw, bHH);
-
-      const wallR = 12+dc[0]*0.07|0, wallG = 16+dc[1]*0.07|0, wallB = 22+dc[2]*0.09|0;
-      const face = c.createLinearGradient(x+bw, y, x, y+bHH);
-      face.addColorStop(0, `rgb(${wallR+28},${wallG+22},${wallB+18})`);
-      face.addColorStop(0.55, `rgb(${wallR},${wallG},${wallB})`);
-      face.addColorStop(1, `rgb(${wallR-8|0},${wallG-8|0},${wallB-6|0})`);
-      c.fillStyle = face;
-      c.fillRect(x,y,bw,bHH);
-
-      const southShade = c.createLinearGradient(x, y+bHH-2, x, y+bHH);
-      southShade.addColorStop(0, 'rgba(0,0,0,0)');
-      southShade.addColorStop(1, 'rgba(0,0,0,0.35)');
-      c.fillStyle = southShade;
-      c.fillRect(x,y,bw,bHH);
-
-      const eastShade = c.createLinearGradient(x+bw-3, y, x+bw, y);
-      eastShade.addColorStop(0, 'rgba(0,0,0,0)');
-      eastShade.addColorStop(1, 'rgba(0,0,0,0.28)');
-      c.fillStyle = eastShade;
-      c.fillRect(x,y,bw,bHH);
-
-      const topR = wallR+14, topG = wallG+12, topB = wallB+20;
-      c.fillStyle=`rgb(${topR},${topG},${topB})`;
-      c.fillRect(x,y,bw,5);
-      c.fillRect(x,y,4,bHH);
-
-      c.fillStyle=`rgb(${wallR+8},${wallG+10},${wallB+22})`;
-      c.fillRect(x+4,y+4,bw-8,5);
-
-      c.strokeStyle=`rgba(${dc[0]/2|0},${75+dc[1]/3|0},${105+dc[2]/3|0},0.18)`;
-      c.lineWidth=1; c.strokeRect(x+0.5,y+0.5,bw-1,bHH-1);
-
-      // Antenna on tall buildings
-      if(bh>2.5){
-        const ax=x+bw/2, ay=y;
-        c.strokeStyle='rgba(180,30,30,0.5)'; c.lineWidth=1;
-        c.beginPath(); c.moveTo(ax,ay); c.lineTo(ax,ay-10); c.stroke();
-        c.fillStyle='rgba(255,50,50,0.7)';
-        c.beginPath(); c.arc(ax,ay-10,2,0,Math.PI*2); c.fill();
-      }
-
-      // Horizontal window-band lines (facade detail)
-      const floors = Math.max(1, Math.floor(bHH/14));
-      for(let f=1;f<floors;f++){
-        const fy = y + f*(bHH/floors);
-        c.strokeStyle=`rgba(0,0,0,0.3)`; c.lineWidth=1;
-        c.beginPath(); c.moveTo(x,fy); c.lineTo(x+bw,fy); c.stroke();
-      }
+// ─── BUILDINGS (dynamic façade vs roof-read) ─────────────────────────
+function buildingRootsSorted(){
+  const roots = [];
+  for(let r = 0; r < ROWS; r++){
+    for(let col = 0; col < COLS; col++){
+      const bd = bdata[ti(col, r)];
+      if(bd?.isRoot) roots.push({ col, r, bd });
     }
   }
+  roots.sort((a, b) => {
+    const da = a.r + a.bd.h, db = b.r + b.bd.h;
+    return da - db || a.col - b.col;
+  });
+  return roots;
+}
+
+function drawSingleBuilding(col, r, bd, playerTileR){
+  const { w, h:bh2, bh, d } = bd;
+  const kind = bd.kind || 'generic';
+  const wx = col * TILE - cam.x;
+  const wy = r * TILE - cam.y;
+  const bw = w * TILE;
+  const bHH = bh2 * TILE;
+  if(wx > W + 80 || wy > H + 120 || wx + bw < -80 || wy + bHH + 40 < -80) return;
+
+  const southEdgeRow = r + bh2 - 1;
+  const northOfPlayer = southEdgeRow < playerTileR;
+
+  let wallR, wallG, wallB, dc;
+  if(kind === 'precinct'){
+    wallR = 38; wallG = 52; wallB = 72;
+    dc = DISTRICTS[0].color;
+  } else {
+    dc = DISTRICTS[d].color;
+    wallR = 12 + (dc[0]*0.07|0);
+    wallG = 16 + (dc[1]*0.07|0);
+    wallB = 22 + (dc[2]*0.09|0);
+  }
+
+  if(!northOfPlayer){
+    const roof = ctx.createLinearGradient(wx, wy, wx + bw * 0.7, wy + bHH * 0.7);
+    roof.addColorStop(0, `rgb(${wallR + 22},${wallG + 20},${wallB + 28})`);
+    roof.addColorStop(1, `rgb(${wallR + 4},${wallG + 6},${wallB + 10})`);
+    ctx.fillStyle = roof;
+    ctx.fillRect(wx, wy, bw, bHH);
+    ctx.strokeStyle = `rgba(${dc[0]/3|0},${dc[1]/3|0},${dc[2]/3|0},0.2)`;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(wx + 0.5, wy + 0.5, bw - 1, bHH - 1);
+    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+    ctx.beginPath();
+    ctx.moveTo(wx + 1, wy + 2);
+    ctx.lineTo(wx + bw - 2, wy + 2);
+    ctx.stroke();
+    if(kind === 'precinct'){
+      ctx.fillStyle = 'rgba(232,213,160,0.12)';
+      ctx.fillRect(wx + bw * 0.35, wy + bHH * 0.35, bw * 0.3, 4);
+    }
+    return;
+  }
+
+  const depth = Math.min(10, 4 + bh * 2.2);
+  ctx.fillStyle = 'rgba(0,0,0,0.38)';
+  ctx.fillRect(wx + depth, wy + depth, bw, bHH);
+  ctx.fillStyle = 'rgba(0,0,0,0.12)';
+  ctx.fillRect(wx + depth * 0.45, wy + depth * 0.45, bw, bHH);
+
+  const face = ctx.createLinearGradient(wx + bw, wy, wx, wy + bHH);
+  face.addColorStop(0, `rgb(${wallR+28},${wallG+22},${wallB+18})`);
+  face.addColorStop(0.55, `rgb(${wallR},${wallG},${wallB})`);
+  face.addColorStop(1, `rgb(${wallR-8|0},${wallG-8|0},${wallB-6|0})`);
+  ctx.fillStyle = face;
+  ctx.fillRect(wx, wy, bw, bHH);
+
+  const southShade = ctx.createLinearGradient(wx, wy + bHH - 2, wx, wy + bHH);
+  southShade.addColorStop(0, 'rgba(0,0,0,0)');
+  southShade.addColorStop(1, 'rgba(0,0,0,0.38)');
+  ctx.fillStyle = southShade;
+  ctx.fillRect(wx, wy, bw, bHH);
+
+  const eastShade = ctx.createLinearGradient(wx + bw - 3, wy, wx + bw, wy);
+  eastShade.addColorStop(0, 'rgba(0,0,0,0)');
+  eastShade.addColorStop(1, 'rgba(0,0,0,0.32)');
+  ctx.fillStyle = eastShade;
+  ctx.fillRect(wx, wy, bw, bHH);
+
+  const skirt = 9;
+  ctx.fillStyle = `rgb(${wallR-14|0},${wallG-12|0},${wallB-10|0})`;
+  ctx.fillRect(wx + 2, wy + bHH, bw - 4, skirt);
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillRect(wx + 2, wy + bHH + skirt - 3, bw - 4, 3);
+
+  const topR = wallR + 14, topG = wallG + 12, topB = wallB + 20;
+  ctx.fillStyle = `rgb(${topR},${topG},${topB})`;
+  ctx.fillRect(wx, wy, bw, 5);
+  ctx.fillRect(wx, wy, 4, bHH);
+
+  ctx.fillStyle = `rgb(${wallR+8},${wallG+10},${wallB+22})`;
+  ctx.fillRect(wx + 4, wy + 4, bw - 8, 5);
+
+  ctx.strokeStyle = `rgba(${dc[0]/2|0},${75+dc[1]/3|0},${105+dc[2]/3|0},0.22)`;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(wx + 0.5, wy + 0.5, bw - 1, bHH - 1);
+
+  if(bh > 2.5){
+    const ax = wx + bw / 2, ay = wy;
+    ctx.strokeStyle = 'rgba(180,30,30,0.5)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(ax, ay);
+    ctx.lineTo(ax, ay - 10);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(255,50,50,0.7)';
+    ctx.beginPath();
+    ctx.arc(ax, ay - 10, 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  const floors = Math.max(1, Math.floor(bHH / 14));
+  for(let f = 1; f < floors; f++){
+    const fy = wy + f * (bHH / floors);
+    ctx.strokeStyle = 'rgba(0,0,0,0.28)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(wx, fy);
+    ctx.lineTo(wx + bw, fy);
+    ctx.stroke();
+  }
+}
+
+function drawSortedBuildings(playerTileR){
+  for(const { col, r, bd } of buildingRootsSorted())
+    drawSingleBuilding(col, r, bd, playerTileR);
+}
+
+function drawEntranceFacades(){
+  for(const ent of entrances){
+    const x = ent.c * TILE - cam.x;
+    const y = ent.r * TILE - cam.y;
+    if(x > W + 40 || y > H + 40 || x + TILE < -40 || y + TILE < -40) continue;
+    let top = '#8a9cae';
+    let stripe = '#e8d5a0';
+    if(ent.kind === 'precinct'){ top = '#c4aa6a'; stripe = '#fff8e8'; }
+    else if(ent.kind === 'store'){ top = '#b84c3d'; stripe = '#ffd89c'; }
+    else if(ent.kind === 'house'){ top = '#4a6a8a'; stripe = '#bcd4ee'; }
+
+    ctx.fillStyle = top;
+    ctx.fillRect(x + 4, y - 12, TILE - 8, 14);
+    ctx.fillStyle = stripe;
+    ctx.fillRect(x + 6, y - 8, TILE - 12, 3);
+
+    ctx.fillStyle = 'rgba(15,18,28,0.75)';
+    ctx.fillRect(x + TILE / 2 - 7, y + 6, 14, 18);
+    ctx.fillStyle = ent.locked ? 'rgba(232,213,160,0.25)' : 'rgba(180,210,255,0.35)';
+    ctx.fillRect(x + TILE / 2 - 5, y + 16, 10, 6);
+
+    ctx.fillStyle = 'rgba(255,255,255,0.22)';
+    ctx.font = '700 8px Barlow Condensed, sans-serif';
+    ctx.textAlign = 'center';
+    const tag = ent.kind === 'precinct' ? 'PD' : ent.kind === 'store' ? 'OPEN' : '';
+    if(tag) ctx.fillText(tag, x + TILE / 2, y - 16);
+  }
+  ctx.textAlign = 'left';
 }
 
 // ─── TRAFFIC ─────────────────────────────────────────────────────────
@@ -839,8 +1278,10 @@ function drawWorld(t){
         sh = Math.min(MH - sy, H);
   ctx.drawImage(mapCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
 
+  drawSortedBuildings(player.tileR);
   drawDynamicTiles(t);
   drawTraffic(t);
+  drawEntranceFacades();
 
   const na = clock.nightAlpha;
   if(na > 0){
@@ -1041,23 +1482,33 @@ function loop(ts){
   const dt = Math.min((ts - last)/1000, 0.05);
   last = ts;
 
-  // Update
   clock.update(dt);
-  player.update(dt, keys);
-  cam.follow(player.x, player.y);
-  cam.update(dt);
-  updateTraffic(dt);
   tickToast(dt);
 
-  // Draw
-  ctx.clearRect(0,0,W,H);
-  drawWorld(ts/1000);
-  drawPlayer(ts/1000);
-  drawFog();
+  if(gameMode === 'interior'){
+    updateInterior(dt, keys);
+    cam.follow(interior.playerX, interior.playerY);
+    cam.update(dt);
+  } else {
+    cam.boundW = MW;
+    cam.boundH = MH;
+    player.update(dt, keys);
+    cam.follow(player.x, player.y);
+    cam.update(dt);
+    updateTraffic(dt);
+  }
+
+  ctx.clearRect(0, 0, W, H);
+  if(gameMode === 'interior'){
+    drawInteriorScene(ts / 1000);
+  } else {
+    drawWorld(ts / 1000);
+    drawPlayer(ts / 1000);
+    drawFog();
+  }
   drawScanlines();
   drawVignette();
 
-  // HUD (DOM)
   updateHUD();
 
   requestAnimationFrame(loop);
@@ -1066,6 +1517,7 @@ function loop(ts){
 // Initial toast
 initTraffic();
 initFog();
+refreshHotbarDOM();
 setTimeout(() => toast('Shift begins. Walk your beat.'), 500);
 requestAnimationFrame(loop);
 </script>
