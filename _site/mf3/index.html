@@ -179,6 +179,7 @@ const T_ROAD_V   = 2;
 const T_ROAD_INT = 3;
 const T_PARK     = 4;
 const T_PAVEMENT = 5;
+const T_ASPHALT_LOT = 6; // gas-station forecourt / parking paint
 
 // Civic lot (carved after roads; metadata applied post-build)
 const PRECINCT_LOT = { c0:4, r0:3, w:4, h:3 }; // door sits on row r0+h (south pavement)
@@ -195,26 +196,42 @@ let map   = new Uint8Array(COLS * ROWS);
 let dmap  = new Uint8Array(COLS * ROWS); // district index per tile
 let bdata = []; // building metadata array
 
-/** @type {{ id:string, c:number, r:number, kind:'precinct'|'store'|'house', locked:boolean, interiorId:string, label:string }[]} */
+/** @type {{ id:string, c:number, r:number, kind:'precinct'|'store'|'house', locked:boolean, interiorId:string, label:string, storeRole?:string, facadeTag?:string, pumpCols?:number[], pumpRow?:number }[]} */
 let entrances = [];
 
 let gameMode = 'street'; // 'street' | 'interior'
 const interior = {
   id: null,
   label: '',
+  theme: 'generic',
   exitWorld: null,
   playerX: 0,
   playerY: 0,
   wTiles: 12,
   hTiles: 10,
-  walls: null, // Uint8Array 1=solid
+  walls: null,
+  hotspots: [],
+  bankCars: [],
+  garageY0: -1,
 };
 
-const INTERIOR_PRESETS = {
-  precinct_hall: { wTiles:14, hTiles:11, label:'Precinct lobby' },
-  store_small:   { wTiles:10, hTiles:8,  label:'Shop floor' },
-  house_small:   { wTiles:9,  hTiles:8,  label:'Residence' },
-};
+let interiorMoving = false;
+let interiorDir = 2;
+
+/** Roles cycle onto storefronts in stable map order */
+const STORE_ROLES = [
+  { role:'convenience', label:'Block 7 Mart',       interiorId:'int_convenience', facadeTag:'24HR', lot:false },
+  { role:'bookstore',   label:'Dog-Eared Books',    interiorId:'int_bookstore',   facadeTag:'BOOK', lot:false },
+  { role:'club',        label:'The Velvet Room',    interiorId:'int_club',        facadeTag:'CLUB', lot:false },
+  { role:'bank',        label:'Citizens Trust',     interiorId:'int_bank',        facadeTag:'BANK', lot:false },
+  { role:'jewelry',     label:'Luminous Gold Co.',  interiorId:'int_jewelry',     facadeTag:'GOLD', lot:false },
+  { role:'gas',         label:'Torque Fuels',       interiorId:'int_gas_mart',    facadeTag:'FUEL', lot:true  },
+  { role:'pharmacy',    label:'MedCap Pharmacy',    interiorId:'int_pharmacy',    facadeTag:'RX',   lot:false },
+  { role:'cafe',        label:'Rust Bean Café',     interiorId:'int_cafe',        facadeTag:'CAFE', lot:false },
+  { role:'pawn',        label:'Uncle Joe\'s Pawn',  interiorId:'int_pawn',        facadeTag:'$$$',  lot:false },
+  { role:'electronics', label:'Circuit Breaker',    interiorId:'int_electronics', facadeTag:'TECH', lot:false },
+  { role:'laundry',     label:'Spin Cycle Laundry', interiorId:'int_laundry',     facadeTag:'WASH', lot:false },
+];
 
 function ti(c, r){ return r * COLS + c; }
 
@@ -281,6 +298,20 @@ function pointInPrecinctFootprint(c, r){
   return c >= c0 && c < c0 + w && r >= r0 && r <= r0 + h;
 }
 
+function carveGasLot(ent){
+  ent.pumpCols = [ent.c - 2, ent.c, ent.c + 2];
+  ent.pumpRow = Math.min(ent.r + 4, ROWS - 2);
+  for(let dr = 1; dr <= 6; dr++){
+    for(let dc = -4; dc <= 4; dc++){
+      const c = ent.c + dc, r = ent.r + dr;
+      if(c < 0 || c >= COLS || r >= ROWS) continue;
+      const ix = ti(c, r);
+      if(map[ix] === T_PAVEMENT || map[ix] === T_PARK)
+        map[ix] = T_ASPHALT_LOT;
+    }
+  }
+}
+
 function seedRetailEntrances(){
   entrances = [];
   const { c0, r0, w, h } = PRECINCT_LOT;
@@ -292,40 +323,57 @@ function seedRetailEntrances(){
     r: doorR,
     kind:'precinct',
     locked:false,
-    interiorId:'precinct_hall',
+    interiorId:'precinct_full',
     label:'Precinct 9',
+    facadeTag:'PD',
   });
 
-  let stores = 0, houses = 0;
-  const maxStores = 18, maxHouses = 14;
+  const candidates = [];
   for(let r = 1; r < ROWS - 1; r++){
     for(let c = 0; c < COLS; c++){
       if(map[ti(c, r)] !== T_PAVEMENT) continue;
       if(map[ti(c, r - 1)] !== T_BUILDING) continue;
       if(pointInPrecinctFootprint(c, r) || pointInPrecinctFootprint(c, r - 1)) continue;
-      // Prefer strips away from intersections (rough heuristic)
-      const jitter = ((c * 17 + r * 31) % 97) / 97;
-      if(stores < maxStores && jitter < 0.035){
-        entrances.push({
-          id:`ent_store_${stores}`,
-          c, r,
-          kind:'store',
-          locked:false,
-          interiorId:'store_small',
-          label:'Storefront',
-        });
-        stores++;
-      } else if(houses < maxHouses && jitter > 0.92){
-        entrances.push({
-          id:`ent_house_${houses}`,
-          c, r,
-          kind:'house',
-          locked:true,
-          interiorId:'house_small',
-          label:'Private residence',
-        });
-        houses++;
-      }
+      candidates.push({ c, r });
+    }
+  }
+  candidates.sort((a, b) => a.r - b.r || a.c - b.c);
+
+  const used = new Set();
+  let si = 0, hi = 0;
+  const maxStores = 24, maxHouses = 14;
+  for(const spot of candidates){
+    const key = `${spot.c},${spot.r}`;
+    if(used.has(key)) continue;
+    const jitter = ((spot.c * 17 + spot.r * 31) % 97) / 97;
+    if(si < maxStores && jitter < 0.038){
+      used.add(key);
+      const role = STORE_ROLES[si % STORE_ROLES.length];
+      const ent = {
+        id:`ent_store_${si}`,
+        c: spot.c, r: spot.r,
+        kind:'store',
+        locked:false,
+        interiorId: role.interiorId,
+        label: role.label,
+        storeRole: role.role,
+        facadeTag: role.facadeTag,
+      };
+      if(role.lot) carveGasLot(ent);
+      entrances.push(ent);
+      si++;
+    } else if(hi < maxHouses && jitter > 0.91){
+      used.add(key);
+      entrances.push({
+        id:`ent_house_${hi}`,
+        c: spot.c, r: spot.r,
+        kind:'house',
+        locked:true,
+        interiorId:'house_small',
+        label:'Private residence',
+        facadeTag:'HOME',
+      });
+      hi++;
     }
   }
 }
@@ -344,24 +392,181 @@ function genInteriorWalls(wT, hT){
   return m;
 }
 
+function createPrecinctLayout(){
+  const WT = 28, HT = 22;
+  const m = new Uint8Array(WT * HT).fill(0);
+  const setW = (x, y) => { if(x >= 0 && x < WT && y >= 0 && y < HT) m[y * WT + x] = 1; };
+  const clr = (x, y) => { if(x >= 0 && x < WT && y >= 0 && y < HT) m[y * WT + x] = 0; };
+
+  for(let x = 0; x < WT; x++){ setW(x, 0); setW(x, HT - 1); }
+  for(let y = 0; y < HT; y++){ setW(0, y); setW(WT - 1, y); }
+  const ds = Math.floor(WT / 2) - 1;
+  clr(ds, HT - 1); clr(ds + 1, HT - 1);
+
+  for(let x = 3; x <= 9; x++){ setW(x, 3); setW(x, 8); }
+  for(let y = 3; y <= 8; y++){ setW(3, y); setW(9, y); }
+  clr(5, 8); clr(6, 8);
+
+  for(let y = 2; y <= HT - 7; y++){
+    if(y === 11 || y === 12) continue;
+    setW(14, y);
+  }
+
+  for(let x = 16; x <= 25; x++){ setW(x, 4); setW(x, 10); }
+  for(let y = 4; y <= 10; y++){ setW(16, y); setW(25, y); }
+  for(let y = 5; y <= 9; y++){ setW(19, y); setW(22, y); }
+  clr(17, 10); clr(18, 10);
+  clr(20, 10); clr(21, 10);
+  clr(23, 10); clr(24, 10);
+
+  const deskY = HT - 6;
+  for(let x = 5; x <= 17; x++){
+    if(x === 11 || x === 12) continue;
+    setW(x, deskY);
+  }
+
+  const doorCx = (ds + 0.5) * TILE;
+  return {
+    wTiles: WT, hTiles: HT, walls: m, theme: 'precinct', label: 'Precinct 9',
+    spawnX: ds * TILE + TILE,
+    spawnY: (HT - 2) * TILE + TILE / 2,
+    hotspots: [
+      { kind:'exit', x: doorCx, y: (HT - 1) * TILE + TILE * 0.52, r: 48 },
+      { kind:'gear', x: 6 * TILE + TILE / 2, y: 5.5 * TILE, r: 42, msg:'Gear lockers · Patrol belt & radio staged. Uniform: patrol blues (only kit this rank).' },
+      { kind:'locker', x: 7.5 * TILE, y: 6 * TILE, r: 38, msg:'Locker bank · Equipped: patrol uniform. (Rank uniforms later.)' },
+      { kind:'desk', x: 11 * TILE, y: (deskY - 1.2) * TILE, r: 46, msg:'Front desk · Duty sergeant post (NPC later).' },
+      { kind:'cells', x: 20.5 * TILE, y: 7 * TILE, r: 52, msg:'Holding cells · Book arrestees here once intake goes live.' },
+    ],
+  };
+}
+
+function createBankLayout(){
+  const WT = 24, HT = 28;
+  const m = new Uint8Array(WT * HT).fill(0);
+  const setW = (x, y) => { if(x >= 0 && x < WT && y >= 0 && y < HT) m[y * WT + x] = 1; };
+  const clr = (x, y) => { if(x >= 0 && x < WT && y >= 0 && y < HT) m[y * WT + x] = 0; };
+
+  for(let x = 0; x < WT; x++){ setW(x, 0); setW(x, HT - 1); }
+  for(let y = 0; y < HT; y++){ setW(0, y); setW(WT - 1, y); }
+  const ds = Math.floor(WT / 2) - 1;
+  clr(ds, HT - 1); clr(ds + 1, HT - 1);
+
+  const splitY = 13;
+  for(let x = 2; x <= WT - 3; x++){
+    if(x === 11 || x === 12) continue;
+    setW(x, splitY);
+  }
+
+  for(let x = 8; x <= 16; x++){ setW(x, 5); setW(x, 9); }
+  for(let y = 5; y <= 9; y++){ setW(8, y); setW(16, y); }
+  clr(11, 9); clr(12, 9);
+  for(let y = 6; y <= 8; y++) for(let x = 9; x <= 15; x++) clr(x, y);
+
+  const bankCars = [];
+  const garageY0 = splitY + 1;
+  for(let i = 0; i < 6; i++){
+    bankCars.push({
+      x: TILE * (4 + (i % 3) * 5) + 10,
+      y: TILE * (garageY0 + 1 + Math.floor(i / 3) * 3) + 12,
+      dir: i % 2 === 0 ? 'right' : 'left',
+      speed: 24 + (i % 4) * 5,
+      color: CAR_COLORS[i % CAR_COLORS.length],
+      length: 22, width: 11,
+      stopped: false, stopTimer: 0,
+    });
+  }
+
+  const doorCx = ds * TILE + TILE;
+  return {
+    wTiles: WT, hTiles: HT, walls: m, theme: 'bank', label: 'Citizens Trust',
+    garageY0: splitY + 1,
+    spawnX: doorCx,
+    spawnY: (HT - 2) * TILE + TILE / 2,
+    bankCars,
+    hotspots: [
+      { kind:'exit', x: doorCx, y: (HT - 1) * TILE + TILE * 0.52, r: 48 },
+      { kind:'atm', x: 5 * TILE, y: 10 * TILE, r: 36, msg:'ATM vestibule · Display only.' },
+      { kind:'garage', x: (WT / 2) * TILE, y: (garageY0 + 5.5) * TILE, r: 120, msg:'Subterranean garage · Public parking under tower.' },
+    ],
+  };
+}
+
+function createRetailInterior(theme, wT, hT, label){
+  const walls = genInteriorWalls(wT, hT);
+  const doorCx = Math.floor(wT / 2) * TILE + TILE / 2;
+  return {
+    wTiles: wT, hTiles: hT, walls, theme, label,
+    spawnX: doorCx,
+    spawnY: (hT - 3) * TILE + TILE / 2,
+    hotspots: [
+      { kind:'exit', x: doorCx, y: (hT - 1) * TILE + TILE * 0.52, r: 46 },
+      { kind:'counter', x: (wT / 2) * TILE, y: 3 * TILE, r: 44, msg:`${label} — counter (staff later).` },
+    ],
+  };
+}
+
+function createHouseLayout(){
+  const wT = 11, hT = 10;
+  const doorCx = Math.floor(wT / 2) * TILE + TILE / 2;
+  return {
+    wTiles: wT, hTiles: hT,
+    walls: genInteriorWalls(wT, hT),
+    theme: 'house',
+    label: 'Private residence',
+    spawnX: doorCx,
+    spawnY: (hT - 3) * TILE + TILE / 2,
+    hotspots:[
+      { kind:'exit', x: doorCx, y: (hT - 1) * TILE + TILE * 0.52, r: 46 },
+    ],
+  };
+}
+
+const RETAIL_INTERIORS = {
+  int_convenience: () => createRetailInterior('convenience', 15, 11, 'Block 7 Mart'),
+  int_bookstore:   () => createRetailInterior('bookstore', 17, 12, 'Dog-Eared Books'),
+  int_club:        () => createRetailInterior('club', 18, 14, 'The Velvet Room'),
+  int_jewelry:     () => createRetailInterior('jewelry', 13, 10, 'Luminous Gold Co.'),
+  int_gas_mart:    () => createRetailInterior('gas_mart', 13, 11, 'Torque Fuels'),
+  int_pharmacy:    () => createRetailInterior('pharmacy', 14, 11, 'MedCap Pharmacy'),
+  int_cafe:        () => createRetailInterior('cafe', 14, 10, 'Rust Bean Café'),
+  int_pawn:        () => createRetailInterior('pawn', 13, 11, 'Uncle Joe\'s Pawn'),
+  int_electronics: () => createRetailInterior('electronics', 15, 11, 'Circuit Breaker'),
+  int_laundry:     () => createRetailInterior('laundry', 14, 11, 'Spin Cycle Laundry'),
+  int_bank:        () => createBankLayout(),
+};
+
+function buildInteriorLayout(ent){
+  if(ent.kind === 'precinct') return createPrecinctLayout();
+  if(ent.kind === 'house') return createHouseLayout();
+  const fn = RETAIL_INTERIORS[ent.interiorId];
+  if(fn) return fn();
+  return createRetailInterior('generic', 12, 10, ent.label || 'Shop');
+}
+
 function enterInterior(ent){
   if(ent.locked){
     toast(`${ent.label} — locked`);
     return;
   }
-  const preset = INTERIOR_PRESETS[ent.interiorId];
-  if(!preset) return;
+  const layout = buildInteriorLayout(ent);
+  if(!layout || !layout.walls) return;
   gameMode = 'interior';
   interior.id = ent.interiorId;
-  interior.label = preset.label;
+  interior.label = layout.label;
+  interior.theme = layout.theme;
+  interior.wTiles = layout.wTiles;
+  interior.hTiles = layout.hTiles;
+  interior.walls = layout.walls;
+  interior.hotspots = layout.hotspots || [];
+  interior.bankCars = layout.bankCars || [];
+  interior.garageY0 = layout.garageY0 !== undefined ? layout.garageY0 : -1;
   interior.exitWorld = { x: player.x, y: player.y };
-  interior.wTiles = preset.wTiles;
-  interior.hTiles = preset.hTiles;
-  interior.walls = genInteriorWalls(preset.wTiles, preset.hTiles);
-  interior.playerX = Math.floor(preset.wTiles / 2) * TILE + TILE / 2;
-  interior.playerY = (preset.hTiles - 3) * TILE + TILE / 2;
-  cam.boundW = preset.wTiles * TILE;
-  cam.boundH = preset.hTiles * TILE;
+  interior.playerX = layout.spawnX;
+  interior.playerY = layout.spawnY;
+  interiorMoving = false;
+  interiorDir = 2;
+  cam.boundW = layout.wTiles * TILE;
+  cam.boundH = layout.hTiles * TILE;
   toast(ent.label);
 }
 
@@ -376,13 +581,17 @@ function exitInterior(){
   }
   interior.id = null;
   interior.walls = null;
+  interior.hotspots = [];
+  interior.bankCars = [];
+  interior.garageY0 = -1;
+  interior.theme = 'generic';
   interior.exitWorld = null;
 }
 
 function interiorCanWalk(nx, ny){
   const WT = interior.wTiles, HT = interior.hTiles;
   const R = 8;
-  const corners = [[nx-R,ny-R],[nx+R,ny-R],[nx-R,ny+R],[nx+R,ny+R]];
+  const corners = [[nx - R, ny - R],[nx + R, ny - R],[nx - R, ny + R],[nx + R, ny + R]];
   for(const [cx, cy] of corners){
     const tx = Math.floor(cx / TILE), ty = Math.floor(cy / TILE);
     if(tx < 0 || ty < 0 || tx >= WT || ty >= HT) return false;
@@ -391,53 +600,224 @@ function interiorCanWalk(nx, ny){
   return true;
 }
 
+function updateBankGarageCars(dt){
+  if(!interior.bankCars || interior.bankCars.length === 0) return;
+  const WT = interior.wTiles;
+  const minX = TILE * 2, maxX = WT * TILE - TILE * 2;
+  interior.bankCars.forEach(car => {
+    const horiz = car.dir === 'right' || car.dir === 'left';
+    const step = (car.dir === 'right' || car.dir === 'down') ? 1 : -1;
+    if(horiz){
+      car.x += step * car.speed * dt;
+      if(car.x < minX){ car.x = minX; car.dir = 'right'; }
+      if(car.x > maxX){ car.x = maxX; car.dir = 'left'; }
+    }
+  });
+}
+
 function updateInterior(dt, keys){
   let dx = 0, dy = 0;
   if(keys['ArrowUp']   || keys['w'] || keys['W']) dy -= 1;
   if(keys['ArrowDown'] || keys['s'] || keys['S']) dy += 1;
   if(keys['ArrowLeft'] || keys['a'] || keys['A']) dx -= 1;
   if(keys['ArrowRight']|| keys['d'] || keys['D']) dx += 1;
+  interiorMoving = dx !== 0 || dy !== 0;
+  if(interiorMoving){
+    if(dx !== 0 && dy !== 0){ dx *= 0.707; dy *= 0.707; }
+    if(dy < 0) interiorDir = 0;
+    else if(dy > 0) interiorDir = 2;
+    else if(dx < 0) interiorDir = 3;
+    else if(dx > 0) interiorDir = 1;
+  }
   const spd = player.speed;
-  if(dx !== 0 && dy !== 0){ dx *= 0.707; dy *= 0.707; }
   const nx = interior.playerX + dx * spd * dt;
   const ny = interior.playerY + dy * spd * dt;
   if(interiorCanWalk(nx, interior.playerY)) interior.playerX = nx;
   if(interiorCanWalk(interior.playerX, ny)) interior.playerY = ny;
   const WT = interior.wTiles, HT = interior.hTiles;
-  interior.playerX = Math.max(TILE/2, Math.min(WT*TILE - TILE/2, interior.playerX));
-  interior.playerY = Math.max(TILE/2, Math.min(HT*TILE - TILE/2, interior.playerY));
+  interior.playerX = Math.max(TILE / 2, Math.min(WT * TILE - TILE / 2, interior.playerX));
+  interior.playerY = Math.max(TILE / 2, Math.min(HT * TILE - TILE / 2, interior.playerY));
+  updateBankGarageCars(dt);
 }
 
-function drawInteriorScene(t){
-  const WT = interior.wTiles, HT = interior.hTiles;
+function interiorFloorStyle(theme, ty, gy0){
+  if(theme === 'bank' && gy0 >= 0 && ty >= gy0)
+    return { a:'#1e2228', b:'#161a22', line:'rgba(255,220,80,0.12)' };
+  if(theme === 'club')
+    return { a:'#241832', b:'#180f28', line:'rgba(200,80,255,0.15)' };
+  if(theme === 'jewelry')
+    return { a:'#2a2838', b:'#1a1828', line:'rgba(232,213,160,0.2)' };
+  if(theme === 'cafe')
+    return { a:'#3a3028', b:'#2a2218', line:'rgba(180,140,90,0.2)' };
+  if(theme === 'pharmacy')
+    return { a:'#283538', b:'#1e282c', line:'rgba(120,180,200,0.15)' };
+  if(theme === 'precinct')
+    return { a:'#343d4c', b:'#262d38', line:'rgba(232,213,160,0.08)' };
+  if(theme === 'house')
+    return { a:'#3a3430', b:'#2a2420', line:'rgba(232,213,160,0.06)' };
+  return { a:'#2a3142', b:'#1e2433', line:'rgba(0,0,0,0.25)' };
+}
 
-  ctx.fillStyle = '#0d1018';
-  ctx.fillRect(0, 0, W, H);
+function drawInteriorDecor(t, ox, oy, WT, HT){
+  const th = interior.theme;
+  const gy = interior.garageY0;
 
-  const ox = -cam.x, oy = -cam.y;
-  for(let y = 0; y < HT; y++){
-    for(let x = 0; x < WT; x++){
-      const wx = x * TILE + ox;
-      const wy = y * TILE + oy;
-      if(wx > W || wy > H || wx + TILE < 0 || wy + TILE < 0) continue;
-      const solid = interior.walls[y * WT + x];
-      if(!solid){
-        const g = ctx.createLinearGradient(wx, wy, wx + TILE, wy + TILE);
-        g.addColorStop(0, '#2a3142');
-        g.addColorStop(1, '#1e2433');
-        ctx.fillStyle = g;
-        ctx.fillRect(wx, wy, TILE, TILE);
-        ctx.strokeStyle = 'rgba(0,0,0,0.25)';
-        ctx.strokeRect(wx + 0.5, wy + 0.5, TILE - 1, TILE - 1);
-      } else {
-        ctx.fillStyle = '#121620';
-        ctx.fillRect(wx, wy, TILE, TILE);
-        ctx.strokeStyle = 'rgba(232,213,160,0.08)';
-        ctx.strokeRect(wx + 0.5, wy + 0.5, TILE - 1, TILE - 1);
+  if(th === 'precinct'){
+    const gx1 = 3 * TILE + ox, gy1 = 3 * TILE + oy;
+    ctx.fillStyle = 'rgba(25,40,65,0.85)';
+    ctx.fillRect(gx1 + 8, gy1 + 18, 6 * TILE - 16, 4 * TILE - 28);
+    for(let i = 0; i < 7; i++){
+      ctx.fillStyle = `rgba(${60 + i * 8},${75 + i * 5},${95 + i * 6},0.9)`;
+      ctx.fillRect(gx1 + 14 + i * 14, gy1 + 22, 10, 4 * TILE - 40);
+      ctx.strokeStyle = 'rgba(232,213,160,0.15)';
+      ctx.strokeRect(gx1 + 14 + i * 14, gy1 + 22, 10, 4 * TILE - 40);
+    }
+    const deskY = (HT - 6) * TILE + oy;
+    ctx.fillStyle = 'rgba(55,48,38,0.95)';
+    ctx.fillRect(5 * TILE + ox, deskY - TILE * 0.85, 9 * TILE, TILE * 0.65);
+    ctx.fillStyle = 'rgba(232,213,160,0.12)';
+    ctx.fillRect(8 * TILE + ox, deskY - TILE * 0.95, 6 * TILE, 8);
+    ctx.fillStyle = 'rgba(40,45,55,0.9)';
+    ctx.fillRect(10.2 * TILE + ox, deskY - TILE * 1.1, TILE * 1.6, TILE * 0.55);
+
+    for(let cell = 0; cell < 3; cell++){
+      const cx = (17 + cell * 3) * TILE + ox;
+      const cy = 5 * TILE + oy;
+      ctx.strokeStyle = 'rgba(180,195,220,0.35)';
+      ctx.lineWidth = 2;
+      for(let k = 0; k < 6; k++){
+        ctx.beginPath();
+        ctx.moveTo(cx + 4 + k * 5, cy + 6);
+        ctx.lineTo(cx + 4 + k * 5, cy + TILE - 12);
+        ctx.stroke();
       }
     }
   }
 
+  if(th === 'bank' && gy >= 0){
+    const yLine = gy * TILE + oy;
+    ctx.strokeStyle = 'rgba(232,213,160,0.12)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 8]);
+    ctx.beginPath();
+    ctx.moveTo(TILE + ox, yLine + TILE * 0.4);
+    ctx.lineTo((WT - 1) * TILE + ox, yLine + TILE * 0.4);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(232,213,160,0.08)';
+    ctx.fillRect(8 * TILE + ox, 6 * TILE + oy, 9 * TILE, 3 * TILE - 8);
+    ctx.strokeStyle = 'rgba(232,213,160,0.25)';
+    ctx.strokeRect(8 * TILE + ox, 6 * TILE + oy, 9 * TILE, 3 * TILE - 8);
+
+    for(let ty = gy; ty < HT - 1; ty++){
+      for(let tx = 3; tx < WT - 3; tx += 4){
+        ctx.fillStyle = 'rgba(255,255,255,0.03)';
+        ctx.fillRect(tx * TILE + ox + 18, ty * TILE + oy + 14, 8, 28);
+      }
+    }
+  }
+
+  if(th === 'convenience' || th === 'gas_mart'){
+    const fx = 2 * TILE + ox, fy = 2 * TILE + oy;
+    ctx.fillStyle = 'rgba(80,120,200,0.35)';
+    ctx.fillRect(fx, fy, TILE * 2.5, (HT - 5) * TILE);
+    for(let i = 0; i < 8; i++){
+      ctx.fillStyle = 'rgba(255,255,255,0.06)';
+      ctx.fillRect(fx + 6, fy + 16 + i * 22, TILE * 2 - 12, 6);
+    }
+    ctx.fillStyle = 'rgba(220,60,50,0.5)';
+    ctx.fillRect((WT - 4) * TILE + ox, 2 * TILE + oy, TILE * 2, TILE * 1.2);
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.font = '700 9px Barlow Condensed, sans-serif';
+    ctx.fillText('OPEN', (WT - 3.3) * TILE + ox, 3 * TILE + oy - 6);
+  }
+
+  if(th === 'bookstore'){
+    for(let col = 2; col < WT - 2; col += 2){
+      ctx.fillStyle = 'rgba(55,42,32,0.85)';
+      ctx.fillRect(col * TILE + ox + 6, 2 * TILE + oy, TILE - 12, (HT - 5) * TILE);
+      ctx.strokeStyle = 'rgba(232,213,160,0.06)';
+      for(let j = 0; j < HT - 6; j++){
+        ctx.strokeRect(col * TILE + ox + 8, 2 * TILE + oy + j * 18, TILE - 16, 14);
+      }
+    }
+  }
+
+  if(th === 'club'){
+    const px = (WT / 2) * TILE + ox;
+    const py = (HT / 2) * TILE + oy;
+    const pulse = 0.4 + 0.25 * Math.sin(t * 5);
+    const rg = ctx.createRadialGradient(px, py, 8, px, py, 140);
+    rg.addColorStop(0, `rgba(220,80,180,${pulse})`);
+    rg.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = rg;
+    ctx.fillRect(ox + TILE, oy + TILE, (WT - 2) * TILE, (HT - 2) * TILE);
+    for(let i = 0; i < 12; i++){
+      ctx.fillStyle = `rgba(${120 + i * 8},60,180,${0.08 + (i % 3) * 0.04})`;
+      ctx.fillRect(TILE + ox + i * 28, (HT - 4) * TILE + oy, 18, 10);
+    }
+  }
+
+  if(th === 'jewelry'){
+    ctx.fillStyle = 'rgba(40,55,75,0.6)';
+    ctx.fillRect(3 * TILE + ox, 4 * TILE + oy, (WT - 6) * TILE, TILE * 0.55);
+    ctx.strokeStyle = 'rgba(232,213,160,0.25)';
+    ctx.strokeRect(3 * TILE + ox, 4 * TILE + oy, (WT - 6) * TILE, TILE * 0.55);
+    for(let i = 0; i < 6; i++){
+      ctx.fillStyle = 'rgba(255,230,180,0.15)';
+      ctx.fillRect(4 * TILE + ox + i * ((WT - 8) * TILE / 6), 4 * TILE + oy + 8, 22, 10);
+    }
+  }
+
+  if(th === 'pharmacy'){
+    ctx.fillStyle = 'rgba(55,120,90,0.35)';
+    ctx.fillRect((WT - 5) * TILE + ox, 2 * TILE + oy, 3 * TILE, (HT - 6) * TILE);
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    for(let j = 0; j < 10; j++){
+      ctx.strokeRect((WT - 4.5) * TILE + ox, 2 * TILE + oy + j * 22, 2 * TILE, 18);
+    }
+  }
+
+  if(th === 'cafe'){
+    ctx.fillStyle = 'rgba(45,35,28,0.9)';
+    ctx.fillRect(4 * TILE + ox, (HT - 5) * TILE + oy, (WT - 8) * TILE, TILE * 0.7);
+    for(let i = 0; i < 6; i++){
+      ctx.fillStyle = 'rgba(232,213,160,0.08)';
+      ctx.fillRect(5 * TILE + ox + i * 36, (HT - 5) * TILE + oy + 12, 22, 16);
+    }
+  }
+
+  if(th === 'pawn'){
+    ctx.fillStyle = 'rgba(180,160,40,0.12)';
+    ctx.strokeStyle = 'rgba(232,213,160,0.15)';
+    ctx.strokeRect(3 * TILE + ox, 4 * TILE + oy, (WT - 6) * TILE, TILE * 1.8);
+    ctx.fillRect(4 * TILE + ox, 5 * TILE + oy, TILE * 1.4, TILE * 1.2);
+  }
+
+  if(th === 'electronics'){
+    for(let row = 2; row < 6; row++){
+      ctx.fillStyle = 'rgba(30,80,120,0.4)';
+      ctx.fillRect(2 * TILE + ox, row * TILE + oy, (WT - 4) * TILE, TILE - 12);
+      ctx.strokeStyle = 'rgba(80,200,255,0.12)';
+      ctx.strokeRect(2 * TILE + ox, row * TILE + oy, (WT - 4) * TILE, TILE - 12);
+    }
+  }
+
+  if(th === 'laundry'){
+    for(let k = 0; k < 5; k++){
+      const lx = 3 * TILE + ox + k * 52 + 8;
+      const ly = 4 * TILE + oy + 10;
+      ctx.fillStyle = 'rgba(210,215,225,0.45)';
+      ctx.fillRect(lx, ly, 36, 48);
+      ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+      ctx.strokeRect(lx, ly, 36, 48);
+      ctx.fillStyle = 'rgba(80,120,200,0.25)';
+      ctx.fillRect(lx + 10, ly + 6, 16, 10);
+    }
+  }
+}
+
+function drawInteriorExitGlow(WT, HT, t, ox, oy){
   const dx0 = Math.floor(WT / 2) - 1;
   const doorY = (HT - 1) * TILE;
   for(let k = 0; k < 2; k++){
@@ -449,19 +829,57 @@ function drawInteriorScene(t){
     ctx.fillStyle = `rgba(232,213,160,${0.25 + glow * 0.2})`;
     ctx.fillRect(wx + 12, wy + 14, TILE - 24, 4);
   }
+}
+
+function drawInteriorScene(t){
+  const WT = interior.wTiles, HT = interior.hTiles;
+  const gy0 = interior.garageY0;
+
+  ctx.fillStyle = '#0d1018';
+  ctx.fillRect(0, 0, W, H);
+
+  const ox = -cam.x, oy = -cam.y;
+  for(let y = 0; y < HT; y++){
+    for(let x = 0; x < WT; x++){
+      const wx = x * TILE + ox;
+      const wy = y * TILE + oy;
+      if(wx > W || wy > H || wx + TILE < 0 || wy + TILE < 0) continue;
+      const solid = interior.walls[y * WT + x];
+      const fs = interiorFloorStyle(interior.theme, y, gy0);
+      if(!solid){
+        const g = ctx.createLinearGradient(wx, wy, wx + TILE, wy + TILE);
+        g.addColorStop(0, fs.a);
+        g.addColorStop(1, fs.b);
+        ctx.fillStyle = g;
+        ctx.fillRect(wx, wy, TILE, TILE);
+        ctx.strokeStyle = fs.line;
+        ctx.strokeRect(wx + 0.5, wy + 0.5, TILE - 1, TILE - 1);
+        if(interior.theme === 'bank' && gy0 >= 0 && y >= gy0){
+          ctx.strokeStyle = 'rgba(255,210,60,0.08)';
+          ctx.beginPath();
+          ctx.moveTo(wx + 6, wy + TILE - 8);
+          ctx.lineTo(wx + TILE - 6, wy + TILE - 8);
+          ctx.stroke();
+        }
+      } else {
+        ctx.fillStyle = interior.theme === 'precinct' ? '#151a22' : '#121620';
+        ctx.fillRect(wx, wy, TILE, TILE);
+        ctx.strokeStyle = 'rgba(232,213,160,0.08)';
+        ctx.strokeRect(wx + 0.5, wy + 0.5, TILE - 1, TILE - 1);
+      }
+    }
+  }
+
+  drawInteriorDecor(t, ox, oy, WT, HT);
+  drawInteriorExitGlow(WT, HT, t, ox, oy);
+
+  if(interior.bankCars && interior.bankCars.length){
+    interior.bankCars.forEach(car => drawCar(car, t));
+  }
 
   const px = interior.playerX - cam.x;
   const py = interior.playerY - cam.y;
-  ctx.fillStyle = 'rgba(0,0,0,0.3)';
-  ctx.beginPath();
-  ctx.ellipse(px, py + 8, 6, 3, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#1e4080';
-  ctx.fillRect(px - 5, py - 8, 10, 14);
-  ctx.fillStyle = '#c8a882';
-  ctx.beginPath();
-  ctx.arc(px, py - 11, 5, 0, Math.PI * 2);
-  ctx.fill();
+  drawCopFigure(ctx, px, py, t, interiorMoving, interiorDir, player.uniformId);
 
   ctx.fillStyle = 'rgba(232,213,160,0.35)';
   ctx.font = '600 11px Barlow Condensed, sans-serif';
@@ -469,7 +887,11 @@ function drawInteriorScene(t){
   ctx.fillText(interior.label.toUpperCase(), W / 2, 42);
   ctx.font = '10px "Share Tech Mono", monospace';
   ctx.fillStyle = 'rgba(255,255,255,0.35)';
-  ctx.fillText('E — EXIT · WASD MOVE', W / 2, H - 56);
+  let hint = 'E — INTERACT / EXIT · WASD MOVE';
+  if(interior.theme === 'precinct')
+    hint += ' · LOCKERS + DESK + CELLS';
+  ctx.fillText(hint, W / 2, H - 56);
+  ctx.textAlign = 'left';
 }
 
 function tryInteractStreet(){
@@ -484,12 +906,23 @@ function tryInteractStreet(){
 }
 
 function tryInteractInterior(){
-  const WT = interior.wTiles, HT = interior.hTiles;
-  const dx0 = Math.floor(WT / 2) - 1;
-  const doorCenterX = (dx0 + 1) * TILE + TILE / 2;
-  const doorCenterY = (HT - 1) * TILE + TILE * 0.55;
-  const d = Math.hypot(interior.playerX - doorCenterX, interior.playerY - doorCenterY);
-  if(d < 44) exitInterior();
+  const px = interior.playerX, py = interior.playerY;
+  let best = null, bestD = 1e9;
+  for(const h of interior.hotspots){
+    const d = Math.hypot(px - h.x, py - h.y);
+    if(d < h.r && d < bestD){ bestD = d; best = h; }
+  }
+  if(!best) return;
+  if(best.kind === 'exit'){
+    exitInterior();
+    return;
+  }
+  if(best.kind === 'gear' || best.kind === 'locker'){
+    player.uniformId = 'patrol';
+    toast(best.msg);
+    return;
+  }
+  toast(best.msg);
 }
 
 // Road axis lists — stored globally so traffic can use them
@@ -610,6 +1043,7 @@ const player = {
   x: (PRECINCT_LOT.c0 + Math.floor(PRECINCT_LOT.w / 2)) * TILE + TILE / 2,
   y: (PRECINCT_LOT.r0 + PRECINCT_LOT.h + 1) * TILE + TILE / 2,
   speed: 90,    // px/sec
+  uniformId: 'patrol',
   dir: 2,       // 0=up 1=right 2=down 3=left
   moving: false,
   animFrame: 0,
@@ -786,6 +1220,18 @@ function renderStaticMap(c){
         c.strokeStyle=`rgba(${br+20},${bg+20},${bb+20},0.2)`; c.lineWidth=0.5;
         c.beginPath(); c.moveTo(x,y); c.lineTo(x+TILE,y); c.stroke();
         c.beginPath(); c.moveTo(x,y); c.lineTo(x,y+TILE); c.stroke();
+      } else if(t===T_ASPHALT_LOT){
+        const ash = 26 + ((col + r * 5) % 4);
+        c.fillStyle = `rgb(${ash},${ash + 2},${ash + 4})`;
+        c.fillRect(x, y, TILE, TILE);
+        c.strokeStyle = 'rgba(255,220,80,0.18)';
+        c.lineWidth = 1;
+        c.strokeRect(x + 1, y + 1, TILE - 2, TILE - 2);
+        c.strokeStyle = 'rgba(0,0,0,0.2)';
+        c.beginPath();
+        c.moveTo(x + 6, y + TILE - 6);
+        c.lineTo(x + TILE - 6, y + TILE - 6);
+        c.stroke();
       } else if(t===T_PARK){
         c.fillStyle='#0a1c0e'; c.fillRect(x,y,TILE,TILE);
         // Rich grass — layered greens
@@ -992,6 +1438,35 @@ function drawSortedBuildings(playerTileR){
     drawSingleBuilding(col, r, bd, playerTileR);
 }
 
+function drawGasForecourts(t){
+  const blink = 0.65 + 0.35 * Math.sin(t * 4);
+  for(const ent of entrances){
+    if(!ent.pumpCols || ent.pumpRow == null) continue;
+    const pr = ent.pumpRow;
+    for(const pc of ent.pumpCols){
+      const bx = pc * TILE - cam.x;
+      const by = pr * TILE - cam.y;
+      if(bx > W + 120 || by > H + 120 || bx + TILE < -120 || by + TILE < -120) continue;
+      ctx.fillStyle = 'rgba(52,58,68,0.95)';
+      ctx.fillRect(bx - 22, by - TILE * 1.05, 44, 14);
+      ctx.fillStyle = '#3d4450';
+      ctx.fillRect(bx - 6, by - 10, 12, TILE + 14);
+      ctx.fillStyle = '#f0c040';
+      ctx.fillRect(bx - 12, by + TILE - 22, 24, 10);
+      ctx.fillStyle = `rgba(255,80,40,${blink})`;
+      ctx.fillRect(bx - 4, by + TILE - 36, 8, 8);
+      ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(bx - 3, by + 6);
+      ctx.quadraticCurveTo(bx + 18, by - 8, bx + 26, by + 4);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(0,0,0,0.15)';
+      ctx.fillRect(bx - 18, by + TILE - 6, 36, 8);
+    }
+  }
+}
+
 function drawEntranceFacades(){
   for(const ent of entrances){
     const x = ent.c * TILE - cam.x;
@@ -1016,8 +1491,8 @@ function drawEntranceFacades(){
     ctx.fillStyle = 'rgba(255,255,255,0.22)';
     ctx.font = '700 8px Barlow Condensed, sans-serif';
     ctx.textAlign = 'center';
-    const tag = ent.kind === 'precinct' ? 'PD' : ent.kind === 'store' ? 'OPEN' : '';
-    if(tag) ctx.fillText(tag, x + TILE / 2, y - 16);
+    const tag = ent.facadeTag || (ent.kind === 'precinct' ? 'PD' : ent.kind === 'store' ? 'OPEN' : '');
+    if(tag) ctx.fillText(tag.slice(0, 8), x + TILE / 2, y - 16);
   }
   ctx.textAlign = 'left';
 }
@@ -1281,6 +1756,7 @@ function drawWorld(t){
   drawSortedBuildings(player.tileR);
   drawDynamicTiles(t);
   drawTraffic(t);
+  drawGasForecourts(t);
   drawEntranceFacades();
 
   const na = clock.nightAlpha;
@@ -1344,85 +1820,84 @@ function drawStreetLamps(nightAlpha, t){
   }
 }
 
-function drawPlayer(t){
-  const sp = cam.ws(player.x, player.y);
-  const x  = sp.x, y = sp.y;
-
-  // Shadow
-  ctx.fillStyle = 'rgba(0,0,0,0.3)';
-  ctx.beginPath();
-  ctx.ellipse(x, y+8, 6, 3, 0, 0, Math.PI*2);
-  ctx.fill();
-
-  // Body — simple pixel-art-style shape
-  const bob = player.moving ? Math.sin(t*12)*1.5 : 0;
-  const dirs = [[0,-1],[1,0],[0,1],[-1,0]]; // up right down left
-  const [fdx, fdy] = dirs[player.dir];
-
-  // Legs (walking anim)
-  if(player.moving){
-    const legSwing = Math.sin(t*14) * 4;
-    ctx.strokeStyle = '#1a3a6a';
-    ctx.lineWidth = 3;
-    ctx.lineCap = 'round';
-    // Left leg
-    ctx.beginPath();
-    ctx.moveTo(x-2, y+4+bob);
-    ctx.lineTo(x-2 + legSwing*0.5, y+10+bob);
-    ctx.stroke();
-    // Right leg
-    ctx.beginPath();
-    ctx.moveTo(x+2, y+4+bob);
-    ctx.lineTo(x+2 - legSwing*0.5, y+10+bob);
-    ctx.stroke();
-  } else {
-    ctx.strokeStyle = '#1a3a6a';
-    ctx.lineWidth = 3;
-    ctx.lineCap = 'round';
-    ctx.beginPath(); ctx.moveTo(x-2,y+4); ctx.lineTo(x-2,y+10); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(x+2,y+4); ctx.lineTo(x+2,y+10); ctx.stroke();
+/** Unified officer sprite — street + interiors (uniform scaffold: patrol only). */
+function drawCopFigure(c, x, y, t, moving, dir, uniformId){
+  const u = uniformId || 'patrol';
+  let torso = '#1e4080', legStroke = '#1a3a6a', hatTop = '#152e5a';
+  if(u === 'patrol'){
+    torso = '#1e4080'; legStroke = '#1a3a6a'; hatTop = '#152e5a';
   }
 
-  // Torso — dark blue uniform
-  ctx.fillStyle = '#1e4080';
-  ctx.beginPath();
-  ctx.moveTo(x-5+2, y-6+bob);
-  ctx.lineTo(x+5-2,  y-6+bob);
-  ctx.quadraticCurveTo(x+5, y-6+bob, x+5, y-6+bob+2);
-  ctx.lineTo(x+5,  y+5+bob-2);
-  ctx.quadraticCurveTo(x+5, y+5+bob, x+5-2, y+5+bob);
-  ctx.lineTo(x-5+2, y+5+bob);
-  ctx.quadraticCurveTo(x-5, y+5+bob, x-5, y+5+bob-2);
-  ctx.lineTo(x-5,  y-6+bob+2);
-  ctx.quadraticCurveTo(x-5, y-6+bob, x-5+2, y-6+bob);
-  ctx.closePath();
-  ctx.fill();
+  c.fillStyle = 'rgba(0,0,0,0.3)';
+  c.beginPath();
+  c.ellipse(x, y + 8, 6, 3, 0, 0, Math.PI * 2);
+  c.fill();
 
-  // Badge glint
-  ctx.fillStyle = '#e8d5a0';
-  ctx.beginPath(); ctx.arc(x+2, y-3+bob, 1.5, 0, Math.PI*2); ctx.fill();
+  const bob = moving ? Math.sin(t * 12) * 1.5 : 0;
+  const dirs = [[0,-1],[1,0],[0,1],[-1,0]];
+  const [fdx, fdy] = dirs[dir];
 
-  // Head
-  ctx.fillStyle = '#c8a882';
-  ctx.beginPath();
-  ctx.arc(x, y-11+bob, 5, 0, Math.PI*2);
-  ctx.fill();
+  if(moving){
+    const legSwing = Math.sin(t * 14) * 4;
+    c.strokeStyle = legStroke;
+    c.lineWidth = 3;
+    c.lineCap = 'round';
+    c.beginPath();
+    c.moveTo(x - 2, y + 4 + bob);
+    c.lineTo(x - 2 + legSwing * 0.5, y + 10 + bob);
+    c.stroke();
+    c.beginPath();
+    c.moveTo(x + 2, y + 4 + bob);
+    c.lineTo(x + 2 - legSwing * 0.5, y + 10 + bob);
+    c.stroke();
+  } else {
+    c.strokeStyle = legStroke;
+    c.lineWidth = 3;
+    c.lineCap = 'round';
+    c.beginPath(); c.moveTo(x - 2, y + 4); c.lineTo(x - 2, y + 10); c.stroke();
+    c.beginPath(); c.moveTo(x + 2, y + 4); c.lineTo(x + 2, y + 10); c.stroke();
+  }
 
-  // Hat
-  ctx.fillStyle = '#152e5a';
-  ctx.fillRect(x-6, y-17+bob, 12, 4);
-  ctx.fillRect(x-4, y-21+bob, 8, 5);
-  ctx.fillStyle = '#e8d5a0';
-  ctx.fillRect(x-4, y-16+bob, 8, 1); // hat band
+  c.fillStyle = torso;
+  c.beginPath();
+  c.moveTo(x - 5 + 2, y - 6 + bob);
+  c.lineTo(x + 5 - 2,  y - 6 + bob);
+  c.quadraticCurveTo(x + 5, y - 6 + bob, x + 5, y - 6 + bob + 2);
+  c.lineTo(x + 5,  y + 5 + bob - 2);
+  c.quadraticCurveTo(x + 5, y + 5 + bob, x + 5 - 2, y + 5 + bob);
+  c.lineTo(x - 5 + 2, y + 5 + bob);
+  c.quadraticCurveTo(x - 5, y + 5 + bob, x - 5, y + 5 + bob - 2);
+  c.lineTo(x - 5,  y - 6 + bob + 2);
+  c.quadraticCurveTo(x - 5, y - 6 + bob, x - 5 + 2, y - 6 + bob);
+  c.closePath();
+  c.fill();
 
-  // Direction indicator (tiny arrow above head)
-  ctx.fillStyle = 'rgba(232,213,160,0.4)';
-  ctx.beginPath();
-  ctx.moveTo(x + fdx*10, y-22+bob + fdy*10);
-  ctx.lineTo(x + fdx*10 - fdy*3, y-22+bob + fdy*10 + fdx*3);
-  ctx.lineTo(x + fdx*10 + fdy*3, y-22+bob + fdy*10 - fdx*3);
-  ctx.closePath();
-  ctx.fill();
+  c.fillStyle = '#e8d5a0';
+  c.beginPath(); c.arc(x + 2, y - 3 + bob, 1.5, 0, Math.PI * 2); c.fill();
+
+  c.fillStyle = '#c8a882';
+  c.beginPath();
+  c.arc(x, y - 11 + bob, 5, 0, Math.PI * 2);
+  c.fill();
+
+  c.fillStyle = hatTop;
+  c.fillRect(x - 6, y - 17 + bob, 12, 4);
+  c.fillRect(x - 4, y - 21 + bob, 8, 5);
+  c.fillStyle = '#e8d5a0';
+  c.fillRect(x - 4, y - 16 + bob, 8, 1);
+
+  c.fillStyle = 'rgba(232,213,160,0.4)';
+  c.beginPath();
+  c.moveTo(x + fdx * 10, y - 22 + bob + fdy * 10);
+  c.lineTo(x + fdx * 10 - fdy * 3, y - 22 + bob + fdy * 10 + fdx * 3);
+  c.lineTo(x + fdx * 10 + fdy * 3, y - 22 + bob + fdy * 10 - fdx * 3);
+  c.closePath();
+  c.fill();
+}
+
+function drawPlayer(t){
+  const sp = cam.ws(player.x, player.y);
+  drawCopFigure(ctx, sp.x, sp.y, t, player.moving, player.dir, player.uniformId);
 }
 
 // ─── VIGNETTE ────────────────────────────────────────────────────────
