@@ -41,7 +41,8 @@ canvas{display:block;}
 .radio-feed{background:#0a0c12;border:1px solid rgba(255,255,255,0.08);border-radius:4px;padding:10px 12px;font-family:'Share Tech Mono',monospace;font-size:11px;color:rgba(180,190,205,0.85);line-height:1.45;min-height:72px;}
 .radio-assignments{min-height:52px;color:rgba(232,213,160,0.45);font-style:italic;font-size:12px;}
 #notify{position:absolute;bottom:110px;left:50%;transform:translateX(-50%);background:rgba(8,12,18,0.9);border-left:3px solid #e8d5a0;border-radius:3px;padding:8px 18px;font-size:14px;color:rgba(255,255,255,0.8);letter-spacing:1px;opacity:0;transition:opacity 0.3s;white-space:nowrap;pointer-events:none;}
-#money-hud{position:absolute;top:12px;left:50%;transform:translateX(-50%);background:rgba(8,12,18,0.85);border:1px solid rgba(255,255,255,0.08);border-radius:4px;padding:6px 16px;font-family:'Share Tech Mono',monospace;font-size:14px;color:#a0d890;letter-spacing:2px;backdrop-filter:blur(6px);}
+#money-hud{position:absolute;top:12px;left:50%;transform:translateX(-50%);background:rgba(8,12,18,0.85);border:1px solid rgba(255,255,255,0.08);border-radius:4px;padding:6px 16px;font-family:'Share Tech Mono',monospace;font-size:14px;color:#a0d890;letter-spacing:2px;backdrop-filter:blur(6px);transition:all 0.3s;box-shadow:0 0 0 rgba(160,216,144,0);}
+#money-hud.pulse{color:#fff;text-shadow:0 0 8px rgba(160,216,144,0.8);box-shadow:0 0 12px rgba(160,216,144,0.15);border-color:rgba(160,216,144,0.3);}
 /* Locker/Shop modal wide */
 #locker-modal .modal-panel,#shop-modal .modal-panel{width:min(640px,96vw);padding:0;}
 .lk-header{padding:16px 20px 12px;border-bottom:1px solid rgba(255,255,255,0.08);}
@@ -150,8 +151,6 @@ let map=new Uint8Array(COLS*ROWS),dmap=new Uint8Array(COLS*ROWS),bdata=[];
 let entrances=[],gameMode='street';
 const interior={id:null,label:'',theme:'generic',exitWorld:null,playerX:0,playerY:0,wTiles:12,hTiles:10,walls:null,hotspots:[],bankCars:[],garageY0:-1};
 let interiorMoving=false,interiorDir=2;
-const GEAR_ORDER=['firearm','taser','cuffs','radio','notebook'];
-const GEAR_UI={firearm:{label:'Patrol Sidearm',short:'Gun'},taser:{label:'Conductive Taser',short:'Tsr'},cuffs:{label:'Standard Cuffs',short:'Cuf'},radio:{label:'Duty Radio',short:'Rad'},notebook:{label:'Patrol Notebook',short:'Nbk'}};
 let weaponFx=[];
 
 // ── MONEY ────────────────────────────────────────────────────────────
@@ -353,6 +352,13 @@ function openShopMenu(role, label){
 function updateMoneyHUD(){
   const el = document.getElementById('money-display');
   if(el) el.textContent = money.toFixed(2);
+  const hud = document.getElementById('money-hud');
+  if(hud){
+    hud.classList.remove('pulse');
+    void hud.offsetWidth; // force reflow
+    hud.classList.add('pulse');
+    setTimeout(()=>hud.classList.remove('pulse'),400);
+  }
   const lk = document.getElementById('lk-money');
   if(lk) lk.textContent = money.toFixed(2);
   const sm = document.getElementById('shop-money');
@@ -361,6 +367,7 @@ function updateMoneyHUD(){
 function openNotebook(){try{document.getElementById('notebook-text').value=localStorage.getItem('bc_notes')||'';}catch(_){}openModal('notebook-modal');setTimeout(()=>document.getElementById('notebook-text').focus(),60);}
 
 // ── WEAPON FX ────────────────────────────────────────────────────────
+let screenShake=0;
 function addWeaponFx(kind){
   const dirs=[[0,-1],[1,0],[0,1],[-1,0]];
   const d=gameMode==='interior'?interiorDir:player.dir;
@@ -368,26 +375,62 @@ function addWeaponFx(kind){
   const px=gameMode==='interior'?interior.playerX:player.x;
   const py=gameMode==='interior'?interior.playerY:player.y;
   const ox=px+dx*14,oy=py+dy*14;
-  if(kind==='firearm'){weaponFx.push({life:0.16,kind:'slug',x:ox,y:oy,dx,dy,len:130});weaponFx.push({life:0.08,kind:'flash',x:ox,y:oy,dx,dy});}
-  else if(kind==='taser')weaponFx.push({life:0.2,kind:'taser',x:ox,y:oy,dx,dy,len:72});
+  if(kind==='firearm'){
+    weaponFx.push({life:0.2,kind:'slug',x:ox,y:oy,dx,dy,len:160,v:1200});
+    weaponFx.push({life:0.1,kind:'flash',x:ox,y:oy,dx,dy});
+    screenShake=6;
+  }
+  else if(kind==='taser'){
+    weaponFx.push({life:0.3,kind:'taser',x:ox,y:oy,dx,dy,len:80});
+    screenShake=2;
+  }
 }
-function updateWeaponFx(dt){weaponFx.forEach(f=>f.life-=dt);weaponFx=weaponFx.filter(f=>f.life>0);}
+function updateWeaponFx(dt){
+  weaponFx.forEach(f=>{
+    f.life-=dt;
+    if(f.kind==='slug'){f.x+=f.dx*f.v*dt;f.y+=f.dy*f.v*dt;f.len*=0.9;}
+  });
+  weaponFx=weaponFx.filter(f=>f.life>0);
+  if(screenShake>0)screenShake=Math.max(0,screenShake-dt*30);
+}
 function drawWeaponFxLayer(){
   weaponFx.forEach(f=>{
-    const sx=f.x-cam.x,sy=f.y-cam.y,a=Math.min(1,f.life*8);
-    if(f.kind==='flash'){const g=ctx.createRadialGradient(sx,sy,0,sx,sy,28);g.addColorStop(0,`rgba(255,255,200,${a*0.9})`);g.addColorStop(1,'rgba(0,0,0,0)');ctx.fillStyle=g;ctx.beginPath();ctx.arc(sx,sy,28,0,Math.PI*2);ctx.fill();}
-    else if(f.kind==='slug'){ctx.strokeStyle=`rgba(255,210,120,${a*0.85})`;ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(sx,sy);ctx.lineTo(sx+f.dx*f.len,sy+f.dy*f.len);ctx.stroke();}
-    else if(f.kind==='taser'){ctx.strokeStyle=`rgba(255,255,120,${a})`;ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(sx,sy);for(let i=1;i<=5;i++){const s2=f.len/5;ctx.lineTo(sx+f.dx*s2*i+(i%2?6:-6),sy+f.dy*s2*i+(i%2?-4:4));}ctx.stroke();}
+    const sx=f.x-cam.x,sy=f.y-cam.y,a=Math.min(1,f.life*6);
+    if(f.kind==='flash'){
+      const g=ctx.createRadialGradient(sx,sy,0,sx,sy,32);
+      g.addColorStop(0,`rgba(255,255,200,${a*0.9})`);g.addColorStop(1,'rgba(255,180,50,0)');
+      ctx.fillStyle=g;ctx.beginPath();ctx.arc(sx,sy,32,0,Math.PI*2);ctx.fill();
+    }
+    else if(f.kind==='slug'){
+      ctx.strokeStyle=`rgba(255,220,100,${a*0.8})`;ctx.lineWidth=3;ctx.lineCap='round';
+      ctx.beginPath();ctx.moveTo(sx-f.dx*f.len,sy-f.dy*f.len);ctx.lineTo(sx,sy);ctx.stroke();
+      ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(sx,sy,1.5,0,Math.PI*2);ctx.fill();
+    }
+    else if(f.kind==='taser'){
+      ctx.strokeStyle=`rgba(200,240,255,${a})`;ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(sx,sy);
+      let cx=sx,cy=sy;
+      for(let i=1;i<=6;i++){
+        const seg=f.len/6;
+        cx+=f.dx*seg+(Math.random()-0.5)*12;
+        cy+=f.dy*seg+(Math.random()-0.5)*12;
+        ctx.lineTo(cx,cy);
+      }
+      ctx.stroke();
+      if(Math.random()>0.5){ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(cx,cy,2,0,Math.PI*2);ctx.fill();}
+    }
   });
 }
 function useHandItem(){
   const id=player.handItem;
   if(!id||!player.gear[id]){toast('Nothing in hand — visit the lockers.');return;}
+  const item=GEAR_CATALOG.find(g=>g.id===id);
+  if(!item)return;
   if(id==='notebook'){openNotebook();return;}
   if(id==='radio'){openModal('radio-modal');return;}
-  if(id==='firearm'){addWeaponFx('firearm');toast('Firearm discharged.');return;}
+  if(['sidearm','rifle','shotgun'].includes(item.cat)){addWeaponFx('firearm');toast(`${item.label} discharged.`);return;}
   if(id==='taser'){addWeaponFx('taser');toast('Taser cycle · contacts live.');return;}
   if(id==='cuffs')toast('Cuffs ready — approach a suspect.');
+  if(id==='baton')toast('Baton drawn.');
 }
 
 // ── STORE ROLES ──────────────────────────────────────────────────────
@@ -595,20 +638,58 @@ function drawDecor(t,ox,oy,WT,HT){
     const elvX=(WT-2)*TILE+ox, elvY1=2*TILE+oy, elvY2=(gy+2)*TILE+oy;
     const elvW=TILE, elvH=TILE;
     [[elvY1,0],[elvY2,1]].forEach(([ey,fi])=>{
-      ctx.fillStyle='rgba(0,0,0,0.4)'; ctx.fillRect(elvX+2,ey+2,elvW,elvH);
+      // Depth shadow
+      ctx.fillStyle='rgba(0,0,0,0.55)'; ctx.fillRect(elvX+4,ey+4,elvW,elvH);
+      
+      // Outer frame
       ctx.fillStyle='#2a3040'; ctx.fillRect(elvX,ey,elvW,elvH);
-      ctx.strokeStyle='rgba(232,213,160,0.4)'; ctx.lineWidth=1.5;
+      ctx.strokeStyle='rgba(232,213,160,0.35)'; ctx.lineWidth=1.5;
       ctx.strokeRect(elvX+0.5,ey+0.5,elvW-1,elvH-1);
-      ctx.fillStyle='rgba(0,0,0,0.7)';
-      ctx.fillRect(elvX+elvW*0.15,ey+elvH*0.1,elvW*0.7,elvH*0.85);
+      
+      // Inner doors area
+      ctx.fillStyle='rgba(10,12,18,0.9)';
+      ctx.fillRect(elvX+elvW*0.1,ey+elvH*0.1,elvW*0.8,elvH*0.9);
+      
+      // Doors (split)
       ctx.fillStyle='#3a4a5c';
-      ctx.fillRect(elvX+elvW*0.15,ey+elvH*0.1,elvW*0.33,elvH*0.85);
-      ctx.fillRect(elvX+elvW*0.52,ey+elvH*0.1,elvW*0.33,elvH*0.85);
-      ctx.fillStyle='rgba(232,213,160,0.8)';
-      ctx.beginPath(); ctx.arc(elvX-elvW*0.18,ey+elvH*0.5,elvW*0.1,0,Math.PI*2); ctx.fill();
-      ctx.fillStyle='rgba(232,213,160,0.7)';
-      ctx.font=`bold ${Math.max(7,elvW*0.22)}px "Share Tech Mono",monospace`;
-      ctx.textAlign='center'; ctx.fillText(fi===0?'G':'B1',elvX+elvW/2,ey+elvH*0.55); ctx.textAlign='left';
+      const doorGap=1;
+      ctx.fillRect(elvX+elvW*0.12,ey+elvH*0.12,elvW*0.37,elvH*0.83);
+      ctx.fillRect(elvX+elvW*0.51,ey+elvH*0.12,elvW*0.37,elvH*0.83);
+      
+      // Door detail lines
+      ctx.strokeStyle='rgba(255,255,255,0.08)'; ctx.lineWidth=1;
+      ctx.beginPath();ctx.moveTo(elvX+elvW*0.25,ey+elvH*0.2);ctx.lineTo(elvX+elvW*0.25,ey+elvH*0.8);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(elvX+elvW*0.75,ey+elvH*0.2);ctx.lineTo(elvX+elvW*0.75,ey+elvH*0.8);ctx.stroke();
+
+      // Call button unit
+      const bx=elvX-elvW*0.22, by=ey+elvH*0.55;
+      ctx.fillStyle='#1a1e24'; ctx.fillRect(bx-4,by-10,8,20);
+      
+      // Animated button light
+      const btnOn = (t*2%1) > 0.2;
+      const btnColor = btnOn ? 'rgba(232,213,160,0.95)' : 'rgba(80,60,40,0.8)';
+      ctx.fillStyle=btnColor;
+      ctx.beginPath(); ctx.arc(bx,by-4,2.5,0,Math.PI*2); ctx.fill();
+      if(btnOn){
+        ctx.shadowBlur=8;ctx.shadowColor='rgba(232,213,160,0.6)';
+        ctx.beginPath(); ctx.arc(bx,by-4,1.5,0,Math.PI*2); ctx.fill();
+        ctx.shadowBlur=0;
+      }
+      ctx.fillStyle='rgba(255,255,255,0.15)';
+      ctx.beginPath(); ctx.arc(bx,by+4,2.5,0,Math.PI*2); ctx.fill();
+
+      // Floor indicator (digital display)
+      const fidx=elvX+elvW/2, fidy=ey+elvH*0.06;
+      ctx.fillStyle='#05080a'; ctx.fillRect(fidx-10,fidy-2,20,12);
+      ctx.strokeStyle='rgba(232,213,160,0.2)'; ctx.lineWidth=0.5; ctx.strokeRect(fidx-10.5,fidy-2.5,21,13);
+      
+      ctx.fillStyle='rgba(232,213,160,0.85)';
+      ctx.font=`bold ${Math.max(7,elvW*0.18)}px "Share Tech Mono",monospace`;
+      ctx.textAlign='center';
+      ctx.shadowBlur=4; ctx.shadowColor='rgba(232,213,160,0.5)';
+      ctx.fillText(fi===0?'G':'B1',fidx,fidy+8);
+      ctx.shadowBlur=0;
+      ctx.textAlign='left';
     });
     // Garage parking lines
     for(let ty=gy;ty<HT-1;ty++)for(let tx=3;tx<WT-3;tx+=4){ctx.fillStyle='rgba(255,255,255,0.04)';ctx.fillRect(tx*TILE+ox+18,ty*TILE+oy+14,8,28);}
@@ -837,6 +918,22 @@ function drawInteriorScene(t){
 
 // ── MAP GENERATION ───────────────────────────────────────────────────
 let roadColsList=[],roadRowsList=[];
+const rampPoints=[];
+function buildRampPoints(){
+  rampPoints.length=0;
+  entrances.forEach(ent=>{
+    if(!ent.pumpCols||ent.pumpRow==null) return;
+    const lotWorldY = ent.pumpRow * TILE;
+    const lotWorldX = ent.c * TILE + TILE/2;
+    roadRowsList.forEach(r=>{
+      const ry = r*TILE + TILE/2;
+      if(Math.abs(ry - lotWorldY) < TILE*6){
+        rampPoints.push({wx:lotWorldX, wy:ry, targetX:lotWorldX, targetY:lotWorldY+TILE*3, roadRow:r, side:'right'});
+      }
+    });
+  });
+}
+
 function genMap(){
   roadColsList=[];roadRowsList=[];
   for(let c=9;c<COLS-2;c+=11)roadColsList.push(c);
@@ -852,6 +949,7 @@ function genMap(){
   stampPrecinctLot();rebuildBuildingBlocks();seedEntrances();
   const dc2=PRECINCT_LOT.c0+Math.floor(PRECINCT_LOT.w/2),dr2=PRECINCT_LOT.r0+PRECINCT_LOT.h+1;
   if(dr2<ROWS&&map[ti(dc2,dr2)]===T_BUILDING)map[ti(dc2,dr2)]=T_PAVEMENT;
+  buildRampPoints();
 }
 genMap();
 
@@ -867,7 +965,7 @@ const player={
   x:(PRECINCT_LOT.c0+Math.floor(PRECINCT_LOT.w/2))*TILE+TILE/2,
   y:(PRECINCT_LOT.r0+PRECINCT_LOT.h+1)*TILE+TILE/2,
   speed:90,uniformId:'patrol',dir:2,moving:false,animFrame:0,animTimer:0,ANIM_RATE:0.12,
-  gear:{firearm:false,taser:false,cuffs:false,radio:false,notebook:false},handItem:null,
+  gear:{glock:true,radio:true,taser:true,cuffs:true,notebook:true},handItem:null,
   update(dt,keys){
     let dx=0,dy=0;
     if(keys['ArrowUp']||keys['w']||keys['W'])dy-=1;if(keys['ArrowDown']||keys['s']||keys['S'])dy+=1;
@@ -887,8 +985,15 @@ const player={
 
 // ── INPUT ────────────────────────────────────────────────────────────
 const keys={};
-let hotbarSelected=0,hotbarItems=[{label:'Radio'},null,null,{label:'Notebook'},null,null,null,null];
-function syncGearHotbar(){hotbarItems=GEAR_ORDER.map(id=>player.gear[id]?{label:GEAR_UI[id].short,gearId:id}:null);while(hotbarItems.length<8)hotbarItems.push(null);}
+let hotbarSelected=0,hotbarItems=[null,null,null,null,null,null,null,null];
+function syncGearHotbar(){
+  const ids=['radio','glock','taser','cuffs','notebook','baton','ar15','shotgun'];
+  hotbarItems=ids.map(id=>{
+    const item=GEAR_CATALOG.find(g=>g.id===id);
+    return(item&&player.gear[id])?{label:item.short,gearId:id}:null;
+  });
+  while(hotbarItems.length<8)hotbarItems.push(null);
+}
 function refreshHotbarDOM(){
   const root=document.getElementById('hotbar');if(!root)return;root.innerHTML='';
   for(let i=0;i<8;i++){const s=document.createElement('div');s.className='hotbar-slot'+(hotbarItems[i]?' has-item':'')+(i===hotbarSelected?' selected':'');s.innerHTML=`<kbd>${i+1}</kbd>`+(hotbarItems[i]?hotbarItems[i].label.slice(0,3):'—');root.appendChild(s);}
@@ -940,8 +1045,8 @@ const clock={elapsed:0,
     this.elapsed+=dt;
     const cy=SHIFT_HOURS*REAL_PER_GAME_HOUR;
     while(this.elapsed>=cy)this.elapsed-=cy;
-    // $20/hr = $20/3600 real seconds per second (REAL_PER_GAME_HOUR sec = 1 game hour)
-    moneyAccum += (HOURLY_PAY / (REAL_PER_GAME_HOUR * 3600)) * dt * 3600 / REAL_PER_GAME_HOUR;
+    // $20/hr = $20 per REAL_PER_GAME_HOUR real seconds
+    moneyAccum += (HOURLY_PAY / REAL_PER_GAME_HOUR) * dt;
     if(moneyAccum >= 0.01){ money += moneyAccum; moneyAccum = 0; updateMoneyHUD(); }
   }
 };
@@ -1066,31 +1171,105 @@ function drawEntranceFacades(){
   for(const ent of entrances){const x=ent.c*TILE-cam.x,y=ent.r*TILE-cam.y;if(x>W+40||y>H+40||x+TILE<-40||y+TILE<-40)continue;let top='#8a9cae',stripe='#e8d5a0';if(ent.kind==='precinct'){top='#c4aa6a';stripe='#fff8e8';}else if(ent.kind==='store'){top='#b84c3d';stripe='#ffd89c';}else if(ent.kind==='house'){top='#4a6a8a';stripe='#bcd4ee';}ctx.fillStyle=top;ctx.fillRect(x+4,y-12,TILE-8,14);ctx.fillStyle=stripe;ctx.fillRect(x+6,y-8,TILE-12,3);ctx.fillStyle='rgba(15,18,28,0.75)';ctx.fillRect(x+TILE/2-7,y+6,14,18);ctx.fillStyle=ent.locked?'rgba(232,213,160,0.25)':'rgba(180,210,255,0.35)';ctx.fillRect(x+TILE/2-5,y+16,10,6);ctx.fillStyle='rgba(255,255,255,0.22)';ctx.font='700 8px "Barlow Condensed",sans-serif';ctx.textAlign='center';const tag=ent.facadeTag||(ent.kind==='precinct'?'PD':ent.kind==='store'?'OPEN':'');if(tag)ctx.fillText(tag.slice(0,8),x+TILE/2,y-16);}ctx.textAlign='left';
 }
 
+// ── NPC SIMULATION ───────────────────────────────────────────────────
+const NPC_STATES = { IDLE:0, COMMUTING:1, WORKING:2, PANIC:3 };
+const NPC_WALKABLE = [T_PAVEMENT, T_ROAD_INT, T_ASPHALT_LOT, T_PARK];
+
+function findPath(startC, startR, endC, endR) {
+  if(startC===endC && startR===endR) return [];
+  const queue = [[startC, startR, []]];
+  const visited = new Uint8Array(COLS*ROWS);
+  visited[ti(startC, startR)] = 1;
+  
+  let head = 0;
+  while(head < queue.length){
+    const [c, r, path] = queue[head++];
+    if(c === endC && r === endR) return path;
+    
+    for(const [dc, dr] of [[0,-1],[1,0],[0,1],[-1,0]]){
+      const nc=c+dc, nr=r+dr;
+      if(nc>=0 && nc<COLS && nr>=0 && nr<ROWS && !visited[ti(nc,nr)]){
+        const t = map[ti(nc,nr)];
+        if(NPC_WALKABLE.includes(t)){
+          visited[ti(nc,nr)] = 1;
+          queue.push([nc, nr, [...path, [nc, nr]]]);
+        }
+      }
+    }
+    if(queue.length > 2000) break; // limit search
+  }
+  return null;
+}
+
+class NPCAgent {
+  constructor(id, homeC, homeR, workC, workR) {
+    this.id = id;
+    this.home = {c:homeC, r:homeR};
+    this.work = {c:workC, r:workR};
+    this.x = homeC*TILE + TILE/2;
+    this.y = homeR*TILE + TILE/2;
+    this.target = null;
+    this.path = [];
+    this.state = NPC_STATES.IDLE;
+    this.speed = 35 + Math.random()*20;
+    this.color = `hsl(${Math.random()*360}, 40%, 60%)`;
+    this.pantsColor = `hsl(${Math.random()*360}, 20%, 30%)`;
+    this.dir = 2;
+    this.animFrame = 0;
+    this.animTimer = 0;
+    this.waitTimer = 0;
+  }
+  update(dt) {
+    const h = clock.gameHour;
+    if(this.state === NPC_STATES.IDLE){
+      if(h >= 8 && h < 9 && Math.random() < 0.01){
+        this.startCommute(this.work.c, this.work.r, NPC_STATES.WORKING);
+      } else if (h >= 17 && h < 18 && Math.random() < 0.01){
+        this.startCommute(this.home.c, this.home.r, NPC_STATES.IDLE);
+      }
+    }
+    
+    if(this.state === NPC_STATES.COMMUTING && this.path.length > 0){
+      const [tc, tr] = this.path[0];
+      const tx = tc*TILE + TILE/2, ty = tr*TILE + TILE/2;
+      const dx = tx - this.x, dy = ty - this.y;
+      const d = Math.hypot(dx, dy);
+      if(d < 2){
+        this.path.shift();
+        if(this.path.length === 0) this.state = this.nextState || NPC_STATES.IDLE;
+      } else {
+        const step = Math.min(d, this.speed*dt);
+        this.x += (dx/d)*step; this.y += (dy/d)*step;
+        if(Math.abs(dx)>Math.abs(dy)) this.dir = dx>0?1:3; else this.dir = dy>0?2:0;
+        this.animTimer += dt; if(this.animTimer > 0.15){ this.animTimer=0; this.animFrame=(this.animFrame+1)%4; }
+      }
+    } else { this.animFrame=0; }
+  }
+  startCommute(tc, tr, next) {
+    const sc = Math.floor(this.x/TILE), sr = Math.floor(this.y/TILE);
+    const p = findPath(sc, sr, tc, tr);
+    if(p){ this.path = p; this.state = NPC_STATES.COMMUTING; this.nextState = next; }
+  }
+}
+
+const SimManager = {
+  npcs: [],
+  init(){
+    const houses = entrances.filter(e=>e.kind==='house');
+    const jobs = entrances.filter(e=>e.kind==='store'||e.kind==='precinct');
+    for(let i=0; i<60; i++){
+      const h = houses[Math.floor(Math.random()*houses.length)];
+      const j = jobs[Math.floor(Math.random()*jobs.length)];
+      if(h && j) this.npcs.push(new NPCAgent(`npc_${i}`, h.c, h.r, j.c, j.r));
+    }
+  },
+  update(dt){ this.npcs.forEach(n=>n.update(dt)); }
+};
+
 // ── TRAFFIC ──────────────────────────────────────────────────────────
 const CAR_COLORS=['#c0392b','#2980b9','#f0c040','#27ae60','#8e44ad','#e67e22','#bdc3c7','#2c3e50','#1abc9c','#e74c3c'];
 const cars=[];
 
-// Ramp locations: {wx,wy,dir} — world pixel positions where cars can turn off
-const rampPoints=[];
-function buildRampPoints(){
-  rampPoints.length=0;
-  // Gas/asphalt lots — each carveGasLot entrance gives us a ramp entry
-  entrances.forEach(ent=>{
-    if(!ent.pumpCols||ent.pumpRow==null) return;
-    // The lot is south of the entrance tile; find nearest road row
-    const lotWorldY = ent.pumpRow * TILE;
-    const lotWorldX = ent.c * TILE + TILE/2;
-    // Find which road row is just north of the lot
-    roadRowsList.forEach(r=>{
-      const ry = r*TILE + TILE/2; // lane centre
-      if(Math.abs(ry - lotWorldY) < TILE*6){
-        // right-going lane turns south into lot
-        rampPoints.push({wx:lotWorldX, wy:ry, targetX:lotWorldX, targetY:lotWorldY+TILE*3, roadRow:r, side:'right'});
-      }
-    });
-  });
-}
-buildRampPoints();
 function initTraffic(){
   roadRowsList.forEach(r=>{
     for(let k=0;k<3;k++) cars.push(mkCar('right', Math.random()*MW, r*TILE+TILE*0.28));
@@ -1247,14 +1426,47 @@ function drawCopFigure(c,x,y,t,moving,dir,uid,scale=1){
   c.lineTo(x+fdx*10*S+fdy*3*S,y-22*S+bob+fdy*10*S-fdx*3*S);
   c.closePath();c.fill();
 }
-function drawPlayer(t){const sp=cam.ws(player.x,player.y);drawCopFigure(ctx,sp.x,sp.y,t,player.moving,player.dir,player.uniformId,1);}
+function drawPlayer(t){const sp=cam.ws(player.x,player.y);drawCopFigure(ctx,sp.x,sp.y,t,player.moving,player.dir,player.uniformId,1);drawWeaponFxLayer();}
+function drawNPCs(t){
+  if(gameMode==='interior')return;
+  SimManager.npcs.forEach(n=>{
+    const sx = n.x - cam.x, sy = n.y - cam.y;
+    if(sx < -20 || sx > W+20 || sy < -20 || sy > H+20) return;
+    ctx.save();
+    ctx.translate(sx, sy);
+    const bounce = n.state === NPC_STATES.COMMUTING ? Math.abs(Math.sin(t*10))*1.5 : 0;
+    
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.beginPath(); ctx.ellipse(0, 4, 5, 2.5, 0, 0, Math.PI*2); ctx.fill();
+    
+    // Legs/Pants
+    ctx.fillStyle = n.pantsColor || '#222';
+    ctx.fillRect(-3, -2-bounce, 2.5, 4);
+    ctx.fillRect(0.5, -2-bounce, 2.5, 4);
+    
+    // Body/Shirt
+    ctx.fillStyle = n.color;
+    ctx.fillRect(-3.5, -8-bounce, 7, 7);
+    
+    // Head
+    ctx.fillStyle = '#e0c0a0'; ctx.beginPath(); ctx.arc(0, -11-bounce, 3.5, 0, Math.PI*2); ctx.fill();
+    
+    // Facing (tiny dot for nose/eyes direction)
+    const dirs=[[0,-1],[1,0],[0,1],[-1,0]];
+    const [dx, dy] = dirs[n.dir];
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.beginPath(); ctx.arc(dx*2, -11-bounce+dy, 1, 0, Math.PI*2); ctx.fill();
+    
+    ctx.restore();
+  });
+}
 
 // ── WORLD DRAW ────────────────────────────────────────────────────────
 function drawWorld(t){
   if(mapDirty||!mapCanvas)buildMapCache();
   const sx=Math.max(0,Math.floor(cam.x)),sy=Math.max(0,Math.floor(cam.y)),sw=Math.min(MW-sx,W),sh=Math.min(MH-sy,H);
   ctx.drawImage(mapCanvas,sx,sy,sw,sh,0,0,sw,sh);
-  drawBuildings(player.tileR);drawDynamicTiles(t);drawTraffic(t);drawGasForecourts(t);drawEntranceFacades();
+  drawBuildings(player.tileR);drawDynamicTiles(t);drawNPCs(t);drawTraffic(t);drawGasForecourts(t);drawEntranceFacades();
   const na=clock.nightAlpha;
   if(na>0){const ng=ctx.createLinearGradient(0,0,0,H);ng.addColorStop(0,`rgba(22,36,72,${na*0.85})`);ng.addColorStop(0.5,`rgba(4,8,28,${na})`);ng.addColorStop(1,`rgba(8,4,18,${na*0.95})`);ctx.fillStyle=ng;ctx.fillRect(0,0,W,H);drawStreetLamps(na,t);}
 }
@@ -1280,16 +1492,21 @@ function updateHUD(){
 let last=0;
 function loop(ts){
   const dt=Math.min((ts-last)/1000,0.05);last=ts;
-  clock.update(dt);tickToast(dt);updateWeaponFx(dt);
+  clock.update(dt);tickToast(dt);updateWeaponFx(dt);SimManager.update(dt);
   if(gameMode==='interior'){if(!anyModalOpen())updateInterior(dt,keys);cam.follow(interior.playerX,interior.playerY);cam.update(dt);}
   else{cam.boundW=MW;cam.boundH=MH;if(!anyModalOpen())player.update(dt,keys);cam.follow(player.x,player.y);cam.update(dt);updateTraffic(dt);}
   ctx.clearRect(0,0,W,H);
+  ctx.save();
+  if(screenShake>0){
+    ctx.translate((Math.random()-0.5)*screenShake, (Math.random()-0.5)*screenShake);
+  }
   if(gameMode==='interior')drawInteriorScene(ts/1000);
   else{drawWorld(ts/1000);drawPlayer(ts/1000);drawFog();}
+  ctx.restore();
   drawScanlines();drawVignette();updateHUD();
   requestAnimationFrame(loop);
 }
-initTraffic();initFog();refreshHotbarDOM();
+initTraffic();initFog();refreshHotbarDOM();SimManager.init();
 setTimeout(()=>toast('Shift begins. Walk your beat.'),500);
 requestAnimationFrame(loop);
 </script>
