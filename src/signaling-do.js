@@ -49,6 +49,32 @@ export class SignalingRoom {
       return new Response(null, { status: 101, webSocket: client });
     }
 
+    // Internal DO-to-DO save request
+    if (url.pathname === '/save' && request.method === 'POST') {
+      try {
+        const body = await request.json();
+        if (body.type === 'save-state' && body.data) {
+          await this.state.storage.put('gameState', body.data);
+          return new Response(JSON.stringify({ ok: true }), {
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (body.type === 'broadcast' && body.message) {
+          for (const ws of this.state.getWebSockets()) {
+            try { ws.send(JSON.stringify(body.message)); } catch (e) {}
+          }
+          return new Response(JSON.stringify({ ok: true }), {
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+      } catch (e) {
+        return new Response(JSON.stringify({ error: 'Invalid save data' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
     // HTTP status endpoint (useful for health checks)
     const peers = [];
     for (const ws of this.state.getWebSockets()) {
