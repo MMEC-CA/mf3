@@ -1,6 +1,7 @@
 // ── Interiors ──────────────────────────────────────────────────────
 import { TILE, ITILE, COLS, ROWS, MW, MH, CAR_COLORS } from './constants.js';
 import { STORE_CATALOGS } from './stores.js';
+import { keys } from './input.js';
 
 export const interior = {
   id: null, label: '', theme: 'generic', exitWorld: null,

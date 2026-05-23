@@ -8,7 +8,7 @@ import { clock } from './src/clock.js';
 import { cam } from './src/camera.js';
 import * as Input from './src/input.js';
 import { player, setMapRef, drawCopFigure, drawPlayer, resetPlayer } from './src/player.js';
-import { weaponFx, addWeaponFx, updateWeaponFx, drawWeaponFxLayer, getScreenShake } from './src/weapons.js';
+import { weaponFx, updateWeaponFx, drawWeaponFxLayer, getScreenShake } from './src/weapons.js';
 import {
   genMap, map, dmap, bdata, entrances, roadColsList, roadRowsList,
   mapCanvas, mapCtx, mapDirty, buildMapCache,
@@ -33,10 +33,10 @@ import { SimManager, drawNPCs } from './src/npcs.js';
 import { initMinimap, drawMinimap } from './src/minimap.js';
 import {
   getActiveAssignments, getCompletedCount, resetAssignments,
-  updateDispatch, acceptAssignment, completeAssignment,
+  updateDispatch,
 } from './src/dispatch.js';
-import { connect, disconnect, on, send, isConnected, generatePeerId } from './src/networking.js';
-import { startAmbient, setMasterVolume, sfxRadioBeep, sfxInteract } from './src/sound.js';
+import { connect, disconnect, on, send, isConnected, getPeers, generatePeerId } from './src/networking.js';
+import { startAmbient, setMasterVolume, sfxRadioBeep, sfxInteract, sfxGunshot, sfxTaser } from './src/sound.js';
 
 // ── Canvas & Resize ────────────────────────────────────────────────
 const canvas = document.getElementById('c');
@@ -73,6 +73,7 @@ initMinimap(map);
 
 // NPCs
 SimManager.init(entrances);
+const simManager = SimManager;
 
 // Input
 const inputHandlers = Input.setupInput([], player.gear);
@@ -87,6 +88,42 @@ resetAssignments();
 
 // Sound
 setMasterVolume(0.4);
+
+// Networking — connect to signaling server for multiplayer/dispatch
+const netBaseUrl = location.origin;
+const netPeerId = generatePeerId();
+connect(netBaseUrl, netPeerId, '');
+
+// Weapon IDs for firearm detection
+const firearms = ['glock', 'ar15', 'sniper', 'shotgun', 'smg'];
+
+// Connection HUD helper
+function updateConnectionHUD() {
+  if (isConnected()) {
+    toast('Connected to dispatch network');
+  } else {
+    toast('Disconnected from dispatch network');
+  }
+}
+
+// Handle incoming dispatch from peers
+on('dispatch', (data) => {
+  if (data.assignment) {
+    toast(`DISPATCH: ${data.assignment.title} (from ${data.from})`);
+    sfxRadioBeep();
+  }
+});
+
+on('connected', () => {
+  updateConnectionHUD();
+});
+
+on('disconnected', () => {
+  updateConnectionHUD();
+});
+
+// Broadcast position periodically
+let netBroadcastTimer = 0;
 
 // Load saved game or start fresh
 const saved = loadGameState();
@@ -151,7 +188,26 @@ Input.onInput('keydown', (e) => {
   }
   if (!e.repeat && e.key === ' ') {
     e.preventDefault();
-    if (!isModalOpen()) useHandItem();
+    if (!isModalOpen()) {
+      useHandItem();
+      // Trigger NPC panic on weapon fire in street mode
+      const id = player.handItem;
+      if (id && player.gear[id] && gameMode === 'street') {
+        if (firearms.includes(id)) {
+          sfxGunshot();
+          const panicked = simManager.panicNearby(player.x, player.y, 200, map);
+          if (panicked > 0) {
+            toast(`Civilians fleeing — ${panicked} nearby`);
+          }
+        } else if (id === 'taser') {
+          sfxTaser();
+          const panicked = simManager.panicNearby(player.x, player.y, 180, map);
+          if (panicked > 0) {
+            toast(`Civilians alarmed — ${panicked} nearby`);
+          }
+        }
+      }
+    }
   }
   if (e.key === 'n' || e.key === 'N') {
     if (!e.repeat && !isModalOpen()) openNotebook();
@@ -172,7 +228,6 @@ Input.onInput('hotbar', (idx) => {
 
 // ── Game Loop ──────────────────────────────────────────────────────
 let last = 0;
-const simManager = SimManager;
 
 function loop(ts) {
   const dt = Math.min((ts - last) / 1000, 0.05);
@@ -192,6 +247,35 @@ function loop(ts) {
       updateRadioUI(getActiveAssignments());
       sfxRadioBeep();
     });
+  }
+
+  // Network broadcast (every 2s)
+  netBroadcastTimer -= dt;
+  if (netBroadcastTimer <= 0 && isConnected()) {
+    netBroadcastTimer = 2;
+    send({
+      type: 'position',
+      x: player.x, y: player.y,
+      dir: player.dir,
+      district: player.districtIdx,
+    });
+    // Share active assignments with peers
+    const assignments = getActiveAssignments();
+    if (assignments.length > 0) {
+      for (const a of assignments) {
+        if (a.accepted) {
+          send({
+            type: 'dispatch',
+            assignment: {
+              id: a.id,
+              title: a.title,
+              targetLabel: a.targetLabel,
+              remaining: a.remaining,
+            },
+          });
+        }
+      }
+    }
   }
 
   // Player update
