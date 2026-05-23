@@ -141,12 +141,8 @@ export function updateDispatch(dt, entrances, onToast, onNewAssignment) {
   assignmentQueue = assignmentQueue.filter(a => activeAssignments.includes(a));
 }
 
-export function completeAssignment(playerInteriorId) {
-  const match = activeAssignments.find(a => {
-    if (!a.accepted) return false;
-    // Check if player is at the right interior
-    return true; // simplified — player calls this when they're at the right place
-  });
+export function completeAssignment(id) {
+  const match = activeAssignments.find(a => a.accepted && a.id === id);
 
   if (match) {
     activeAssignments = activeAssignments.filter(a => a.id !== match.id);

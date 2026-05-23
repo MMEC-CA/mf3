@@ -3,6 +3,7 @@ import { clock } from './clock.js';
 import { player } from './player.js';
 import { GEAR_CATALOG, UNIFORM_CATALOG, STORE_CATALOGS } from './stores.js';
 import { DISTRICTS } from './constants.js';
+import { getActiveAssignments } from './dispatch.js';
 import { hotbarItems, setHotbarSelected } from './input.js';
 import { weaponFx, addWeaponFx } from './weapons.js';
 import { saveGame, loadGame, deleteSave } from './save.js';
@@ -137,20 +138,60 @@ export function openRadio() {
   openModal('radio-modal');
 }
 
-export function updateRadioUI(assignments) {
+export function updateRadioUI(assignments, onAccept, onComplete) {
   const el = document.getElementById('radio-dispatch');
   const assignmentsEl = document.querySelector('.radio-assignments');
   if (!el || !assignmentsEl) return;
 
   if (assignments && assignments.length > 0) {
-    el.innerHTML = assignments.map(a =>
-      `${a.accepted ? '▶' : '○'} ${a.title} — ${a.targetLabel} ${a.accepted ? `(${Math.ceil(a.remaining)}s)` : ''}`
-    ).join('<br>');
+    el.innerHTML = assignments.map(a => {
+      const prefix = a.accepted ? '▶' : '○';
+      const timer = a.accepted ? `(${Math.ceil(a.remaining)}s)` : '';
+      const btn = !a.accepted
+        ? '<button class="radio-accept-btn" type="button">Accept</button>'
+        : '<button class="radio-complete-btn" type="button">Complete</button>';
+      return `<div class="radio-assignment-item ${a.accepted ? 'accepted' : ''}" data-id="${a.id}">
+        ${prefix} ${a.title} — ${a.targetLabel} ${timer}
+        ${btn}
+      </div>`;
+    }).join('');
+
+    // Wire up click handlers
+    if (onAccept && onComplete) {
+      const refresh = () => updateRadioUI(getActiveAssignments(), onAccept, onComplete);
+      el.querySelectorAll('.radio-accept-btn').forEach(btn => {
+        btn.onclick = (e) => {
+          e.stopPropagation();
+          const id = btn.closest('.radio-assignment-item').dataset.id;
+          const result = onAccept(id);
+          if (result) {
+            sfxRadioBeep();
+            toast(`Accepted: ${result.title}`);
+          }
+          refresh();
+        };
+      });
+      el.querySelectorAll('.radio-complete-btn').forEach(btn => {
+        btn.onclick = (e) => {
+          e.stopPropagation();
+          const id = btn.closest('.radio-assignment-item').dataset.id;
+          const result = onComplete(id);
+          if (result) {
+            sfxRadioBeep();
+            toast(`Completed: ${result.title} (+$${result.reward})`);
+            addMoney(result.reward);
+          }
+          refresh();
+        };
+      });
+    }
+
     assignmentsEl.innerHTML = assignments.filter(a => a.accepted).length > 0
       ? 'Respond to active assignments.'
-      : 'Press E on an assignment to accept it.';
+      : 'Click Accept on an assignment to respond.';
   } else {
-    el.textContent = 'PRECINCT 9 — Channel clear. Stand by for assignment routing.';
+    el.textContent = '';
+    el.innerHTML = '<div style="color:rgba(232,213,160,0.45);">PRECINCT 9 — Channel clear. Stand by for assignment routing.</div>';
     assignmentsEl.textContent = 'No active calls at this time.';
   }
 }
@@ -251,7 +292,7 @@ export function openShopMenu(role, label) {
 }
 
 // ── Use hand item ──────────────────────────────────────────────────
-export function useHandItem() {
+export function useHandItem(gameMode = 'street') {
   const id = player.handItem;
   if (!id || !player.gear[id]) { toast('Nothing in hand — visit the lockers.'); return; }
   const item = GEAR_CATALOG.find(g => g.id === id);
@@ -260,12 +301,17 @@ export function useHandItem() {
   if (id === 'notebook') { openNotebook(); return; }
   if (id === 'radio') { openRadio(); return; }
   if (['sidearm', 'rifle', 'shotgun'].includes(item.cat)) {
-    addWeaponFx('firearm', 'street', player, null);
+    // In street mode, main.js handles weapon FX + sound + NPC panic
+    if (gameMode !== 'street') {
+      addWeaponFx('firearm', gameMode, player, null);
+    }
     toast(`${item.label} discharged.`);
     return;
   }
   if (id === 'taser') {
-    addWeaponFx('taser', 'street', player, null);
+    if (gameMode !== 'street') {
+      addWeaponFx('taser', gameMode, player, null);
+    }
     toast('Taser cycle · contacts live.');
     return;
   }

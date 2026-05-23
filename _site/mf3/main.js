@@ -33,7 +33,7 @@ import { SimManager, drawNPCs } from './src/npcs.js';
 import { initMinimap, drawMinimap } from './src/minimap.js';
 import {
   getActiveAssignments, getCompletedCount, resetAssignments,
-  updateDispatch,
+  updateDispatch, acceptAssignment, completeAssignment,
 } from './src/dispatch.js';
 import { connect, disconnect, on, send, isConnected, getPeers, generatePeerId } from './src/networking.js';
 import { startAmbient, setMasterVolume, sfxRadioBeep, sfxInteract, sfxGunshot, sfxTaser } from './src/sound.js';
@@ -99,10 +99,10 @@ const firearms = ['glock', 'ar15', 'sniper', 'shotgun', 'smg'];
 
 // Connection HUD helper
 function updateConnectionHUD() {
-  if (isConnected()) {
-    toast('Connected to dispatch network');
-  } else {
-    toast('Disconnected from dispatch network');
+  const dot = document.getElementById('connection-dot');
+  if (dot) {
+    dot.className = isConnected() ? 'connected' : 'disconnected';
+    dot.title = isConnected() ? 'Dispatch network: Connected' : 'Dispatch network: Disconnected';
   }
 }
 
@@ -189,7 +189,7 @@ Input.onInput('keydown', (e) => {
   if (!e.repeat && e.key === ' ') {
     e.preventDefault();
     if (!isModalOpen()) {
-      useHandItem();
+      useHandItem(gameMode);
       // Trigger NPC panic on weapon fire in street mode
       const id = player.handItem;
       if (id && player.gear[id] && gameMode === 'street') {
@@ -244,7 +244,7 @@ function loop(ts) {
   // Dispatch updates (only in street mode)
   if (gameMode === 'street') {
     updateDispatch(dt, entrances, toast, (a) => {
-      updateRadioUI(getActiveAssignments());
+      updateRadioUI(getActiveAssignments(), acceptAssignment, completeAssignment);
       sfxRadioBeep();
     });
   }

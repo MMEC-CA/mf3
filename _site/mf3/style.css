@@ -427,6 +427,59 @@ canvas {
   font-size: 12px;
 }
 
+.radio-assignment-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  margin-bottom: 4px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 3px;
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 11px;
+  color: rgba(180, 190, 205, 0.85);
+}
+
+.radio-assignment-item.accepted {
+  border-color: rgba(232, 213, 160, 0.25);
+  background: rgba(232, 213, 160, 0.05);
+}
+
+.radio-accept-btn,
+.radio-complete-btn {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 9px;
+  letter-spacing: 1px;
+  padding: 4px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all 0.12s;
+  flex-shrink: 0;
+  margin-left: 8px;
+}
+
+.radio-accept-btn {
+  background: rgba(64, 180, 100, 0.15);
+  color: #40b464;
+}
+
+.radio-accept-btn:hover {
+  background: rgba(64, 180, 100, 0.3);
+  border-color: rgba(64, 180, 100, 0.4);
+}
+
+.radio-complete-btn {
+  background: rgba(232, 213, 160, 0.12);
+  color: #e8d5a0;
+}
+
+.radio-complete-btn:hover {
+  background: rgba(232, 213, 160, 0.25);
+  border-color: rgba(232, 213, 160, 0.4);
+}
+
 /* ── Notification Toast ──────────────────────────────────────────── */
 #notify {
   position: absolute;
@@ -444,6 +497,30 @@ canvas {
   transition: opacity 0.3s;
   white-space: nowrap;
   pointer-events: none;
+}
+
+/* ── Connection Status Dot ───────────────────────────────────────── */
+#connection-dot {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  transition: background 0.5s, box-shadow 0.5s;
+  z-index: 20;
+  pointer-events: auto;
+}
+
+#connection-dot.connected {
+  background: #40ff60;
+  box-shadow: 0 0 8px rgba(64, 255, 96, 0.5);
+}
+
+#connection-dot.disconnected {
+  background: #ff4040;
+  box-shadow: 0 0 8px rgba(255, 64, 64, 0.35);
 }
 
 /* ── Money HUD ───────────────────────────────────────────────────── */
